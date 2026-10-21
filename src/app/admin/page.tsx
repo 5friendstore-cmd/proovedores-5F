@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import HeaderNav from '@/components/HeaderNav';
 import { supabase } from '@/lib/supabaseClient';
@@ -23,6 +23,13 @@ export default function AdminDashboard() {
   const [productos, setProductos] = useState<ItemInventario[]>([]);
   const [movimientosPendientes, setMovimientosPendientes] = useState<any[]>([]);
   const [pagosPendientes, setPagosPendientes] = useState<any[]>([]);
+  
+  // Filtros y Búsqueda
+  const [busqueda, setBusqueda] = useState('');
+  const [categoriaFiltro, setCategoriaFiltro] = useState('todas');
+  const [orden, setOrden] = useState<'nombre' | 'stock_desc' | 'precio_desc'>('nombre');
+
+  // Envíos y Rentas
   const [selectedProd, setSelectedProd] = useState('');
   const [cantEnvio, setCantEnvio] = useState(1);
   const [tiendaEnvio, setTiendaEnvio] = useState('taiyari');
@@ -40,7 +47,6 @@ export default function AdminDashboard() {
 
   const verificarSesionAdmin = async () => {
     const { data: { session } } = await supabase.auth.getSession();
-    
     if (!session) {
       router.replace('/login');
       return;
@@ -61,28 +67,21 @@ export default function AdminDashboard() {
   };
 
   const cargarDatos = async () => {
-    // 1. Obtener catálogo base
     const { data: prods } = await supabase
       .from('productos')
       .select('*')
       .order('categoria', { ascending: true });
 
-    // 2. Obtener existencias actuales en cada tienda
     const { data: inv } = await supabase
       .from('inventario_tienda')
       .select('producto_id, tienda_id, stock_actual');
 
     if (prods) {
       const inventarioConsolidado: ItemInventario[] = prods.map((p) => {
-        const registroTaiyari = inv?.find(
-          (i) => i.producto_id === p.id && i.tienda_id === 'taiyari'
-        );
-        const registroHaruss = inv?.find(
-          (i) => i.producto_id === p.id && i.tienda_id === 'haruss'
-        );
-
-        const stockTaiyari = registroTaiyari ? registroTaiyari.stock_actual : 0;
-        const stockHaruss = registroHaruss ? registroHaruss.stock_actual : 0;
+        const regTaiyari = inv?.find(i => i.producto_id === p.id && i.tienda_id === 'taiyari');
+        const regHaruss = inv?.find(i => i.producto_id === p.id && i.tienda_id === 'haruss');
+        const stTaiyari = regTaiyari ? regTaiyari.stock_actual : 0;
+        const stHaruss = regHaruss ? regHaruss.stock_actual : 0;
 
         return {
           id: p.id,
@@ -90,16 +89,15 @@ export default function AdminDashboard() {
           nombre: p.nombre,
           categoria: p.categoria,
           precio_venta: Number(p.precio_venta) || 0,
-          stock_taiyari: stockTaiyari,
-          stock_haruss: stockHaruss,
-          stock_total: stockTaiyari + stockHaruss,
+          stock_taiyari: stTaiyari,
+          stock_haruss: stHaruss,
+          stock_total: stTaiyari + stHaruss,
         };
       });
 
       setProductos(inventarioConsolidado);
     }
 
-    // 3. Cargar movimientos y pagos pendientes
     const { data: movs } = await supabase
       .from('movimientos_stock')
       .select('*, productos(nombre), tiendas(nombre)')
@@ -156,24 +154,47 @@ export default function AdminDashboard() {
     alert('Renta registrada. Haruss Cake deberá confirmar la recepción.');
   };
 
-  // Filtrado reactivo según el selector de tienda
-  const productosFiltrados = productos.filter((p) => {
-    if (filtroTienda === 'taiyari') return p.stock_taiyari > 0;
-    if (filtroTienda === 'haruss') return p.stock_haruss > 0;
-    return true; // 'todos'
-  });
+  // Categorías únicas
+  const categorias = useMemo(() => {
+    const cats = new Set(productos.map(p => p.categoria).filter(Boolean));
+    return ['todas', ...Array.from(cats)];
+  }, [productos]);
 
-  // Métricas financieras calculadas según la vista seleccionada
-  const valorTotalInventario = productosFiltrados.reduce((acc, p) => {
-    if (filtroTienda === 'taiyari') return acc + p.stock_taiyari * p.precio_venta;
-    if (filtroTienda === 'haruss') return acc + p.stock_haruss * p.precio_venta;
-    return acc + p.stock_total * p.precio_venta;
-  }, 0);
+  // Filtrado y ordenamiento reactivo
+  const productosFiltrados = useMemo(() => {
+    return productos
+      .filter((p) => {
+        const coincideTienda = 
+          filtroTienda === 'todos' ? true :
+          filtroTienda === 'taiyari' ? p.stock_taiyari > 0 :
+          p.stock_haruss > 0;
 
-  const totalPiezasInventario = productosFiltrados.reduce((acc, p) => {
+        const coincideTexto = 
+          p.nombre.toLowerCase().includes(busqueda.toLowerCase()) ||
+          p.sku.toLowerCase().includes(busqueda.toLowerCase());
+
+        const coincideCat = categoriaFiltro === 'todas' || p.categoria === categoriaFiltro;
+
+        return coincideTienda && coincideTexto && coincideCat;
+      })
+      .sort((a, b) => {
+        if (orden === 'stock_desc') return b.stock_total - a.stock_total;
+        if (orden === 'precio_desc') return b.precio_venta - a.precio_venta;
+        return a.nombre.localeCompare(b.nombre);
+      });
+  }, [productos, filtroTienda, busqueda, categoriaFiltro, orden]);
+
+  // Métricas
+  const totalPiezas = productosFiltrados.reduce((acc, p) => {
     if (filtroTienda === 'taiyari') return acc + p.stock_taiyari;
     if (filtroTienda === 'haruss') return acc + p.stock_haruss;
     return acc + p.stock_total;
+  }, 0);
+
+  const valorTotal = productosFiltrados.reduce((acc, p) => {
+    if (filtroTienda === 'taiyari') return acc + (p.stock_taiyari * p.precio_venta);
+    if (filtroTienda === 'haruss') return acc + (p.stock_haruss * p.precio_venta);
+    return acc + (p.stock_total * p.precio_venta);
   }, 0);
 
   if (!autorizado) {
@@ -188,82 +209,82 @@ export default function AdminDashboard() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <HeaderNav titulo="Panel Administrador Five Friends" rol="admin" />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
-        {/* Filtro y Próximas Visitas */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
-            <h3 className="text-xs uppercase font-mono text-slate-400">Próxima Visita Taiyari</h3>
-            <p className="text-xl font-bold text-amber-400 mt-1">Lunes Alternado</p>
-            <p className="text-xs text-slate-500 mt-2">Base: 19 de Octubre 2026 (Quincenal)</p>
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-6">
+        
+        {/* Próximas Visitas y Selector de Tienda */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+            <span className="text-[10px] uppercase font-mono text-slate-400 block">Visita Taiyari (Quincenal)</span>
+            <p className="text-lg sm:text-xl font-bold text-amber-400 mt-1">Lunes Alternado</p>
+            <span className="text-[11px] text-slate-500 block mt-1">Base: 19 de Octubre 2026</span>
           </div>
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
-            <h3 className="text-xs uppercase font-mono text-slate-400">Próxima Visita Haruss</h3>
-            <p className="text-xl font-bold text-amber-400 mt-1">Miércoles Alternado</p>
-            <p className="text-xs text-slate-500 mt-2">Inicio: 21 de Octubre 2026 (Quincenal)</p>
+
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+            <span className="text-[10px] uppercase font-mono text-slate-400 block">Visita Haruss (Quincenal)</span>
+            <p className="text-lg sm:text-xl font-bold text-amber-400 mt-1">Miércoles Alternado</p>
+            <span className="text-[11px] text-slate-500 block mt-1">Inicio: 21 de Octubre 2026</span>
           </div>
-          <div className="bg-slate-900 border border-amber-500/30 p-5 rounded-2xl bg-amber-500/5">
-            <h3 className="text-xs uppercase font-mono text-amber-400 font-bold">Filtro de Tienda</h3>
+
+          <div className="sm:col-span-2 lg:col-span-1 bg-slate-900 border border-amber-500/30 p-4 sm:p-5 rounded-2xl bg-amber-500/5">
+            <span className="text-[10px] uppercase font-mono text-amber-400 font-bold block">Filtrar por Tienda</span>
             <select
               value={filtroTienda}
               onChange={(e) => setFiltroTienda(e.target.value)}
-              className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm font-semibold text-slate-100 focus:ring-2 focus:ring-amber-500 outline-none"
+              className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-xs sm:text-sm font-semibold text-slate-100 outline-none focus:border-amber-500"
             >
               <option value="todos">🌐 Todas las Tiendas (Global)</option>
-              <option value="taiyari">🏬 Taiyari Multimarcas (Consignación)</option>
+              <option value="taiyari">🏬 Taiyari Multimarcas (Consigna)</option>
               <option value="haruss">🍰 Haruss Cake (Renta Fija)</option>
             </select>
-            <p className="text-[11px] text-slate-400 mt-2">
-              Mostrando {productosFiltrados.length} productos en catálogo.
-            </p>
           </div>
         </div>
 
-        {/* Métricas Dinámicas */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
-            <span className="text-xs text-slate-400 uppercase font-mono">Piezas en Tienda ({filtroTienda})</span>
-            <p className="text-3xl font-extrabold text-white mt-1">{totalPiezasInventario} <span className="text-sm font-normal text-slate-400">unidades</span></p>
+        {/* Métricas Adaptables */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+            <span className="text-xs text-slate-400 uppercase font-mono block">Piezas Físicas ({filtroTienda})</span>
+            <p className="text-2xl sm:text-3xl font-extrabold text-white mt-1">{totalPiezas} <span className="text-xs sm:text-sm font-normal text-slate-400">unidades</span></p>
           </div>
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
-            <span className="text-xs text-slate-400 uppercase font-mono">Valor Estimado del Stock ({filtroTienda})</span>
-            <p className="text-3xl font-extrabold text-amber-400 mt-1">${valorTotalInventario.toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-sm font-normal text-slate-400">MXN</span></p>
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+            <span className="text-xs text-slate-400 uppercase font-mono block">Valor Estimado ({filtroTienda})</span>
+            <p className="text-2xl sm:text-3xl font-extrabold text-amber-400 mt-1">${valorTotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-xs sm:text-sm font-normal text-slate-400">MXN</span></p>
           </div>
         </div>
 
-        {/* Operaciones de Stock y Pagos */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
-            <h2 className="text-lg font-bold text-white mb-4">Reabastecer Inventario</h2>
-            <form onSubmit={handleCrearEnvio} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+        {/* Formulario de Reabastecimiento y Pagos */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
+            <h2 className="text-base sm:text-lg font-bold text-white mb-3">Reabastecer Inventario</h2>
+            <form onSubmit={handleCrearEnvio} className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-xs text-slate-400">Destino</label>
+                  <label className="text-xs text-slate-400 block mb-1">Destino</label>
                   <select
                     value={tiendaEnvio}
                     onChange={(e) => setTiendaEnvio(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm mt-1"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm"
                   >
                     <option value="taiyari">Taiyari Multimarcas</option>
                     <option value="haruss">Haruss Cake</option>
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs text-slate-400">Piezas a enviar</label>
+                  <label className="text-xs text-slate-400 block mb-1">Piezas a enviar</label>
                   <input
                     type="number"
                     min="1"
                     value={cantEnvio}
                     onChange={(e) => setCantEnvio(parseInt(e.target.value) || 1)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-sm mt-1"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm"
                   />
                 </div>
               </div>
               <div>
-                <label className="text-xs text-slate-400">Producto</label>
+                <label className="text-xs text-slate-400 block mb-1">Producto</label>
                 <select
                   value={selectedProd}
                   onChange={(e) => setSelectedProd(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm mt-1"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm"
                   required
                 >
                   <option value="">Selecciona un producto...</option>
@@ -274,32 +295,32 @@ export default function AdminDashboard() {
               </div>
               <button
                 type="submit"
-                className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold py-2.5 rounded-lg text-sm"
+                className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold py-2.5 rounded-xl text-xs sm:text-sm transition"
               >
-                Registrar Envío a Tienda
+                Registrar Envío
               </button>
             </form>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-6">
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl space-y-4">
             <div>
-              <h2 className="text-lg font-bold text-white mb-3">Pagos de Mercancía por Validar</h2>
+              <h2 className="text-base sm:text-lg font-bold text-white mb-2">Validación de Pagos</h2>
               {pagosPendientes.length === 0 ? (
-                <p className="text-xs text-slate-500">No hay pagos reportados pendientes.</p>
+                <p className="text-xs text-slate-500">No hay pagos pendientes de confirmación.</p>
               ) : (
                 <div className="space-y-2">
                   {pagosPendientes.map((p) => (
-                    <div key={p.id} className="flex items-center justify-between bg-slate-950 p-3 rounded-xl border border-slate-800">
-                      <div>
-                        <span className="text-xs text-amber-400 font-bold">{p.tiendas?.nombre}</span>
-                        <p className="text-sm font-semibold">${Number(p.monto).toFixed(2)} MXN</p>
-                        <p className="text-[11px] text-slate-400">{p.nota || 'Sin notas'}</p>
+                    <div key={p.id} className="flex items-center justify-between bg-slate-950 p-3 rounded-xl border border-slate-800 gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs text-amber-400 font-bold block">{p.tiendas?.nombre}</span>
+                        <p className="text-xs sm:text-sm font-semibold">${Number(p.monto).toFixed(2)} MXN</p>
+                        <p className="text-[11px] text-slate-400 truncate">{p.nota || 'Sin notas'}</p>
                       </div>
                       <button
                         onClick={() => handleAprobarPago(p.id)}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-xs font-bold px-3 py-1.5 rounded-lg"
+                        className="shrink-0 bg-emerald-600 hover:bg-emerald-700 text-xs font-bold px-3 py-1.5 rounded-lg"
                       >
-                        Aprobar Ingreso
+                        Aprobar
                       </button>
                     </div>
                   ))}
@@ -307,53 +328,124 @@ export default function AdminDashboard() {
               )}
             </div>
 
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-sm font-bold text-slate-300 mb-2">Emisión de Renta Mensual (Haruss Cake)</h3>
+            <div className="border-t border-slate-800 pt-3">
+              <h3 className="text-xs sm:text-sm font-bold text-slate-300 mb-1.5">Renta Mensual Haruss Cake</h3>
               <div className="flex gap-2">
                 <input
                   type="month"
                   value={periodoRenta}
                   onChange={(e) => setPeriodoRenta(e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs"
+                  className="bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs"
                 />
                 <button
                   onClick={handleRegistrarRenta}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-xs font-bold px-4 py-2 rounded-lg"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-xs font-bold px-3.5 py-2 rounded-xl transition"
                 >
-                  Registrar Pago de Renta ($250 MXN)
+                  Registrar ($250 MXN)
                 </button>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Catálogo Maestro con Desglose de Stock por Tienda */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-          <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 mb-4">
+        {/* CATÁLOGO RESPONSIVO CON BUSCADOR Y FILTROS */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
             <div>
-              <h2 className="text-lg font-bold text-white">Inventario y Modificación de Precios</h2>
-              <p className="text-xs text-slate-400">Edita el precio de venta unitario; se guarda al cambiar de celda.</p>
+              <h2 className="text-base sm:text-lg font-bold text-white">Catálogo de Productos y Precios</h2>
+              <p className="text-xs text-slate-400">Edita el precio de venta directamente en la celda.</p>
             </div>
-            <div className="text-xs font-mono text-amber-400">
-              {filtroTienda === 'todos' && 'Vista Global (Taiyari + Haruss)'}
-              {filtroTienda === 'taiyari' && 'Vista Exclusiva Taiyari'}
-              {filtroTienda === 'haruss' && 'Vista Exclusiva Haruss'}
-            </div>
+            <span className="text-xs text-amber-400 font-mono">
+              Mostrando {productosFiltrados.length} piezas
+            </span>
           </div>
 
-          <div className="overflow-x-auto">
+          {/* Filtros */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+            <input
+              type="text"
+              placeholder="🔍 Buscar por nombre o SKU..."
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500"
+            />
+            
+            <select
+              value={categoriaFiltro}
+              onChange={(e) => setCategoriaFiltro(e.target.value)}
+              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-amber-500 capitalize"
+            >
+              {categorias.map(cat => (
+                <option key={cat} value={cat}>
+                  {cat === 'todas' ? '📁 Todas las Categorías' : `📁 ${cat}`}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={orden}
+              onChange={(e: any) => setOrden(e.target.value)}
+              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-amber-500"
+            >
+              <option value="nombre">🔤 Nombre (A-Z)</option>
+              <option value="stock_desc">📦 Mayor Stock Total</option>
+              <option value="precio_desc">💲 Mayor Precio</option>
+            </select>
+          </div>
+
+          {/* VISTA MÓVIL: Tarjetas */}
+          <div className="grid grid-cols-1 gap-2.5 md:hidden">
+            {productosFiltrados.length === 0 ? (
+              <p className="text-center text-slate-500 text-xs py-8">No se encontraron productos.</p>
+            ) : (
+              productosFiltrados.map((prod) => (
+                <div key={prod.id} className="bg-slate-950/70 border border-slate-800/80 p-3.5 rounded-xl space-y-2">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase font-mono block">{prod.categoria} • {prod.sku}</span>
+                      <h4 className="text-sm font-semibold text-slate-100">{prod.nombre}</h4>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] text-slate-400 block font-mono">Total</span>
+                      <span className="text-sm font-extrabold text-amber-400">{prod.stock_total} pzas</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-xs">
+                    <div className="flex gap-2 font-mono text-[11px]">
+                      <span className="text-amber-300">Taiyari: {prod.stock_taiyari}</span>
+                      <span className="text-sky-300">Haruss: {prod.stock_haruss}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-slate-500">$</span>
+                      <input
+                        type="number"
+                        step="0.50"
+                        defaultValue={prod.precio_venta}
+                        onBlur={(e) => handleUpdatePrecio(prod.id, parseFloat(e.target.value) || 0)}
+                        className="w-16 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs focus:border-amber-500 outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* VISTA TABLETAS Y LAPTOPS: Tabla Tradicional */}
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left text-sm text-slate-300">
               <thead className="text-xs uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
                 <tr>
                   <th className="p-3">Categoría</th>
                   <th className="p-3">Nombre</th>
                   <th className="p-3">SKU</th>
-                  <th className="p-3">Precio Venta (MXN)</th>
+                  <th className="p-3">Precio Venta</th>
                   {(filtroTienda === 'todos' || filtroTienda === 'taiyari') && (
-                    <th className="p-3 text-center bg-slate-900/50 text-amber-300">Taiyari</th>
+                    <th className="p-3 text-center text-amber-300">Taiyari</th>
                   )}
                   {(filtroTienda === 'todos' || filtroTienda === 'haruss') && (
-                    <th className="p-3 text-center bg-slate-900/50 text-sky-300">Haruss</th>
+                    <th className="p-3 text-center text-sky-300">Haruss</th>
                   )}
                   {filtroTienda === 'todos' && (
                     <th className="p-3 text-right font-bold text-white">Total</th>
@@ -364,7 +456,7 @@ export default function AdminDashboard() {
                 {productosFiltrados.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="p-6 text-center text-slate-500 text-sm">
-                      No se encontraron piezas registradas con stock en esta tienda.
+                      No se encontraron productos coincidentes.
                     </td>
                   </tr>
                 ) : (
@@ -381,24 +473,18 @@ export default function AdminDashboard() {
                             step="0.50"
                             defaultValue={prod.precio_venta}
                             onBlur={(e) => handleUpdatePrecio(prod.id, parseFloat(e.target.value) || 0)}
-                            className="w-24 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-right font-mono focus:border-amber-500 focus:outline-none"
+                            className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-right font-mono focus:border-amber-500 outline-none"
                           />
                         </div>
                       </td>
                       {(filtroTienda === 'todos' || filtroTienda === 'taiyari') && (
-                        <td className="p-3 text-center font-bold text-amber-400">
-                          {prod.stock_taiyari}
-                        </td>
+                        <td className="p-3 text-center font-bold text-amber-400">{prod.stock_taiyari}</td>
                       )}
                       {(filtroTienda === 'todos' || filtroTienda === 'haruss') && (
-                        <td className="p-3 text-center font-bold text-sky-400">
-                          {prod.stock_haruss}
-                        </td>
+                        <td className="p-3 text-center font-bold text-sky-400">{prod.stock_haruss}</td>
                       )}
                       {filtroTienda === 'todos' && (
-                        <td className="p-3 text-right font-extrabold text-white">
-                          {prod.stock_total}
-                        </td>
+                        <td className="p-3 text-right font-extrabold text-white">{prod.stock_total}</td>
                       )}
                     </tr>
                   ))
@@ -407,6 +493,7 @@ export default function AdminDashboard() {
             </table>
           </div>
         </div>
+
       </main>
     </div>
   );
