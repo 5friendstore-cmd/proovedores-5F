@@ -50,11 +50,12 @@ export default function LoginPage() {
 
     if (perfil.rol === 'admin') {
       router.push('/admin');
-    } else if (perfil.rol === 'punto_venta' && perfil.tienda_id) {
-      router.push(`/portal/${perfil.tienda_id}`);
+    } else if (perfil.tienda_id === 'taiyari' || identificador.toLowerCase().includes('taiyari')) {
+      router.push('/portal/taiyari');
+    } else if (perfil.tienda_id === 'haruss' || identificador.toLowerCase().includes('haruss')) {
+      router.push('/portal/haruss');
     } else {
-      setErrorMsg('Configuración de cuenta sin permisos asignados.');
-      setLoading(false);
+      router.push(`/portal/${perfil.tienda_id}`);
     }
   };
 
