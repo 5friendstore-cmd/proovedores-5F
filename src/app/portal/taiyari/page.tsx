@@ -13,11 +13,14 @@ export default function PortalTaiyari() {
   const [inventario, setInventario] = useState<any[]>([]);
   const [recepcionesPendientes, setRecepcionesPendientes] = useState<any[]>([]);
   
+  // Pestaña activa del portal de Taiyari
+  const [seccionActiva, setSeccionActiva] = useState<'inventario' | 'acciones' | 'aprobaciones' | 'auditoria' | 'pedidos'>('inventario');
+
   // Auditoría
   const [historialVentas, setHistorialVentas] = useState<any[]>([]);
   const [historialMovimientos, setHistorialMovimientos] = useState<any[]>([]);
   const [historialPagos, setHistorialPagos] = useState<any[]>([]);
-  const [pestanaAuditoria, setPestanaAuditoria] = useState<'ventas' | 'movimientos' | 'pagos'>('ventas');
+  const [subPestanaAuditoria, setSubPestanaAuditoria] = useState<'ventas' | 'movimientos' | 'pagos'>('ventas');
 
   // Filtros de Inventario
   const [busqueda, setBusqueda] = useState('');
@@ -85,7 +88,6 @@ export default function PortalTaiyari() {
     if (pagos) setHistorialPagos(pagos);
   };
 
-  // Cálculos Financieros
   const totalComisionGanada = historialVentas.reduce((acc, v) => acc + Number(v.monto_tienda || 0), 0);
   const totalVendidoPara5F = historialVentas.reduce((acc, v) => acc + Number(v.monto_five_friends || 0), 0);
   const totalPagadoAprobado = historialPagos
@@ -97,13 +99,11 @@ export default function PortalTaiyari() {
 
   const saldoPendientePorPagar = Math.max(0, (665.00 + totalVendidoPara5F) - totalPagadoAprobado);
 
-  // Lista de categorías únicas para los filtros
   const categorias = useMemo(() => {
     const cats = new Set(inventario.map(i => i.productos?.categoria).filter(Boolean));
     return ['todas', ...Array.from(cats)];
   }, [inventario]);
 
-  // Filtrado y ordenamiento de productos
   const productosFiltrados = useMemo(() => {
     return inventario
       .filter(item => {
@@ -120,20 +120,26 @@ export default function PortalTaiyari() {
       });
   }, [inventario, busqueda, categoriaFiltro, orden]);
 
-  const handleConfirmarRecepcion = async (movId: string, prodId: string, cant: number) => {
+  // Confirmar Reabastecimiento o Retiro/Retorno de Bazar
+  const handleConfirmarMovimiento = async (mov: any) => {
     await supabase
       .from('movimientos_stock')
       .update({ estado: 'confirmado', confirmado_en: new Date().toISOString() })
-      .eq('id', movId);
+      .eq('id', mov.id);
 
-    const item = inventario.find((i) => i.producto_id === prodId);
-    const nuevoStock = (item?.stock_actual || 0) + cant;
+    const item = inventario.find((i) => i.producto_id === mov.producto_id);
+    const stockActual = item?.stock_actual || 0;
+    
+    // Si el movimiento es 'alta' se suma; si es 'baja' (retiro bazar) se resta
+    const nuevoStock = mov.tipo === 'alta' 
+      ? stockActual + mov.cantidad 
+      : Math.max(0, stockActual - mov.cantidad);
 
     await supabase
       .from('inventario_tienda')
-      .upsert({ tienda_id: 'taiyari', producto_id: prodId, stock_actual: nuevoStock });
+      .upsert({ tienda_id: 'taiyari', producto_id: mov.producto_id, stock_actual: nuevoStock });
 
-    alert('Mercancía agregada a tu inventario disponible.');
+    alert('Movimiento confirmado y reflejado en tu stock disponible.');
     cargarPortal();
   };
 
@@ -205,7 +211,7 @@ export default function PortalTaiyari() {
   if (!autorizado) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400 font-mono text-xs">
-        Cargando portal adaptativo de Taiyari...
+        Cargando portal de Taiyari...
       </div>
     );
   }
@@ -216,21 +222,21 @@ export default function PortalTaiyari() {
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-6">
         
-        {/* Cabecera Responsiva */}
+        {/* Cabecera Comercial */}
         <div className="bg-gradient-to-r from-slate-900 to-slate-800 border border-slate-800 p-4 sm:p-6 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
           <div>
             <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">Taiyari Multimarcas</h1>
             <p className="text-xs sm:text-sm text-slate-400 mt-1">
-              Consignación: <span className="text-emerald-400 font-semibold">20% ganancia</span> | 80% liquidación 5F
+              Consignación: <span className="text-emerald-400 font-semibold">20% ganancia</span> por venta | 80% liquidación 5F
             </p>
           </div>
           <div className="w-full sm:w-auto bg-slate-950/60 border border-slate-800/80 px-3.5 py-2 rounded-xl text-left sm:text-right">
-            <span className="text-[10px] uppercase font-mono text-slate-400 block">Día de Corte / Visita</span>
+            <span className="text-[10px] uppercase font-mono text-slate-400 block">Día de Visita / Corte</span>
             <span className="text-xs sm:text-sm font-bold text-amber-400">Lunes alternados (Quincenal)</span>
           </div>
         </div>
 
-        {/* Tarjetas Financieras (1 col en celular, 2 en tableta, 4 en PC) */}
+        {/* Tarjetas Financieras */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <div className="bg-slate-900 border border-emerald-500/30 p-4 sm:p-5 rounded-2xl bg-emerald-500/5">
             <span className="text-[11px] text-emerald-400 uppercase font-mono font-bold block">Tus Ganancias (20%)</span>
@@ -253,7 +259,7 @@ export default function PortalTaiyari() {
             <p className="text-2xl font-extrabold text-slate-200 mt-1">
               ${totalPagadoAprobado.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-500 block mt-1">Validado por Five Friends</span>
+            <span className="text-[10px] text-slate-500 block mt-1">Confirmado por 5F</span>
           </div>
 
           <div className="bg-slate-900 border border-amber-500/30 p-4 sm:p-5 rounded-2xl bg-amber-500/5">
@@ -265,83 +271,92 @@ export default function PortalTaiyari() {
           </div>
         </div>
 
-        {/* Mercancía Entrante */}
-        {recepcionesPendientes.length > 0 && (
-          <div className="bg-amber-500/10 border border-amber-500/30 p-4 sm:p-5 rounded-2xl space-y-3">
-            <h3 className="text-xs sm:text-sm font-bold text-amber-400 flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
-              Mercancía Entrante por Confirmar
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-              {recepcionesPendientes.map((m) => (
-                <div key={m.id} className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-xs sm:text-sm font-semibold truncate">{m.productos?.nombre}</p>
-                    <p className="text-[11px] text-slate-400">{m.cantidad} piezas enviadas</p>
-                  </div>
-                  <button
-                    onClick={() => handleConfirmarRecepcion(m.id, m.producto_id, m.cantidad)}
-                    className="shrink-0 bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold px-3 py-1.5 rounded-lg transition"
-                  >
-                    Confirmar
-                  </button>
-                </div>
-              ))}
+        {/* MENÚ DE PESTAÑAS INTUITIVO */}
+        <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs sm:text-sm overflow-x-auto">
+          <button
+            onClick={() => setSeccionActiva('inventario')}
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap ${
+              seccionActiva === 'inventario' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            📦 Mi Inventario
+          </button>
+          <button
+            onClick={() => setSeccionActiva('acciones')}
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap ${
+              seccionActiva === 'acciones' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            ⚡ Registrar Venta / Pago
+          </button>
+          <button
+            onClick={() => setSeccionActiva('aprobaciones')}
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap relative ${
+              seccionActiva === 'aprobaciones' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🔔 Aprobaciones {recepcionesPendientes.length > 0 && <span className="w-2 h-2 rounded-full bg-rose-500 inline-block ml-1"></span>}
+          </button>
+          <button
+            onClick={() => setSeccionActiva('auditoria')}
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap ${
+              seccionActiva === 'auditoria' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            📑 Historial
+          </button>
+          <button
+            onClick={() => setSeccionActiva('pedidos')}
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap ${
+              seccionActiva === 'pedidos' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            📝 Encargos
+          </button>
+        </div>
+
+        {/* CONTENIDO 1: INVENTARIO */}
+        {seccionActiva === 'inventario' && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-white">Stock Disponible en Tienda</h2>
+                <p className="text-xs text-slate-400">Total en tienda: {inventario.reduce((acc, i) => acc + (i.stock_actual || 0), 0)} piezas</p>
+              </div>
+              <span className="text-xs text-amber-400 font-mono">Mostrando {productosFiltrados.length} piezas</span>
             </div>
-          </div>
-        )}
 
-        {/* MÓDULO DE INVENTARIO CON FILTROS Y TARJETAS EN CELULAR */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-            <div>
-              <h2 className="text-base sm:text-lg font-bold text-white">Inventario en Tienda</h2>
-              <p className="text-xs text-slate-400">Total de piezas: {inventario.reduce((acc, i) => acc + (i.stock_actual || 0), 0)} unidades</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <input
+                type="text"
+                placeholder="🔍 Buscar por nombre o SKU..."
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value)}
+                className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500"
+              />
+              <select
+                value={categoriaFiltro}
+                onChange={(e) => setCategoriaFiltro(e.target.value)}
+                className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-amber-500 capitalize"
+              >
+                {categorias.map(cat => (
+                  <option key={cat} value={cat}>{cat === 'todas' ? '📁 Todas las Categorías' : `📁 ${cat}`}</option>
+                ))}
+              </select>
+              <select
+                value={orden}
+                onChange={(e: any) => setOrden(e.target.value)}
+                className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-amber-500"
+              >
+                <option value="nombre">🔤 Nombre (A-Z)</option>
+                <option value="stock_desc">📦 Mayor Stock Disponible</option>
+                <option value="precio_desc">💲 Mayor Precio</option>
+              </select>
             </div>
-            <span className="text-xs text-amber-400 font-mono">
-              Mostrando {productosFiltrados.length} piezas
-            </span>
-          </div>
 
-          {/* Barra de Filtros y Búsqueda */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-            <input
-              type="text"
-              placeholder="🔍 Buscar por nombre o SKU..."
-              value={busqueda}
-              onChange={(e) => setBusqueda(e.target.value)}
-              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500"
-            />
-            
-            <select
-              value={categoriaFiltro}
-              onChange={(e) => setCategoriaFiltro(e.target.value)}
-              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-amber-500 capitalize"
-            >
-              {categorias.map(cat => (
-                <option key={cat} value={cat}>
-                  {cat === 'todas' ? '📁 Todas las Categorías' : `📁 ${cat}`}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={orden}
-              onChange={(e: any) => setOrden(e.target.value)}
-              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-amber-500"
-            >
-              <option value="nombre">🔤 Nombre (A-Z)</option>
-              <option value="stock_desc">📦 Mayor Stock Disponible</option>
-              <option value="precio_desc">💲 Mayor Precio</option>
-            </select>
-          </div>
-
-          {/* VISTA 1: Celulares (Tarjetas Táctiles) */}
-          <div className="grid grid-cols-1 gap-2.5 md:hidden">
-            {productosFiltrados.length === 0 ? (
-              <p className="text-center text-slate-500 text-xs py-8">No se encontraron productos con esos filtros.</p>
-            ) : (
-              productosFiltrados.map((item) => (
+            {/* Móvil */}
+            <div className="grid grid-cols-1 gap-2.5 md:hidden">
+              {productosFiltrados.map((item) => (
                 <div key={item.id} className="bg-slate-950/70 border border-slate-800/80 p-3 rounded-xl flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <span className="text-[10px] text-slate-500 uppercase font-mono block truncate">{item.productos?.categoria} • {item.productos?.sku}</span>
@@ -353,31 +368,23 @@ export default function PortalTaiyari() {
                     <span className="text-base font-extrabold text-amber-400">{item.stock_actual}</span>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+              ))}
+            </div>
 
-          {/* VISTA 2: Tabletas y Laptops (Tabla Completa) */}
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-left text-sm text-slate-300">
-              <thead className="text-xs uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
-                <tr>
-                  <th className="p-3">Categoría</th>
-                  <th className="p-3">Nombre</th>
-                  <th className="p-3">SKU</th>
-                  <th className="p-3">Precio Venta</th>
-                  <th className="p-3 text-right">Disponibles</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {productosFiltrados.length === 0 ? (
+            {/* Laptop */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left text-sm text-slate-300">
+                <thead className="text-xs uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
                   <tr>
-                    <td colSpan={5} className="p-6 text-center text-slate-500 text-sm">
-                      No se encontraron productos con esos filtros.
-                    </td>
+                    <th className="p-3">Categoría</th>
+                    <th className="p-3">Nombre</th>
+                    <th className="p-3">SKU</th>
+                    <th className="p-3">Precio Venta</th>
+                    <th className="p-3 text-right">Disponibles</th>
                   </tr>
-                ) : (
-                  productosFiltrados.map((item) => (
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {productosFiltrados.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-800/40">
                       <td className="p-3 text-slate-400 text-xs">{item.productos?.categoria}</td>
                       <td className="p-3 font-medium text-slate-100">{item.productos?.nombre}</td>
@@ -385,144 +392,179 @@ export default function PortalTaiyari() {
                       <td className="p-3 font-mono">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</td>
                       <td className="p-3 text-right font-bold text-amber-400">{item.stock_actual}</td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Acciones: Venta y Pagos */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
-            <h2 className="text-base sm:text-lg font-bold text-white mb-3">Registrar Venta</h2>
-            <form onSubmit={handleRegistrarVenta} className="space-y-3">
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Producto</label>
-                <select
-                  value={prodVenta}
-                  onChange={(e) => setProdVenta(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-200 outline-none focus:border-emerald-500"
-                  required
-                >
-                  <option value="">Selecciona el producto...</option>
-                  {inventario.map((i) => (
-                    <option key={i.id} value={i.producto_id}>
-                      {i.productos?.nombre} ({i.stock_actual} disp. | ${i.productos?.precio_venta})
-                    </option>
                   ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Piezas Vendidas</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={cantVenta}
-                  onChange={(e) => setCantVenta(parseInt(e.target.value) || 1)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs sm:text-sm transition"
-              >
-                Confirmar Salida y Venta
-              </button>
-            </form>
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
-            <h2 className="text-base sm:text-lg font-bold text-white mb-3">Reportar Pago a 5F</h2>
-            <form onSubmit={handleReportarPago} className="space-y-3">
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Monto (MXN)</label>
-                <input
-                  type="number"
-                  step="0.50"
-                  required
-                  placeholder="0.00"
-                  value={montoPago}
-                  onChange={(e) => setMontoPago(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Folio / Referencia</label>
-                <input
-                  type="text"
-                  placeholder="Ej. Transferencia corte lunes 19 Oct"
-                  value={notaPago}
-                  onChange={(e) => setNotaPago(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold py-2.5 rounded-xl text-xs sm:text-sm border border-slate-700 transition"
-              >
-                Notificar Pago
-              </button>
-            </form>
-          </div>
-        </div>
-
-        {/* Módulo de Auditoría Responsivo */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
-            <div>
-              <h2 className="text-base sm:text-lg font-bold text-white">Auditoría e Historial</h2>
-              <p className="text-xs text-slate-400">Bitácora de movimientos y ventas</p>
-            </div>
-            
-            {/* Pestañas Desplazables en Celular */}
-            <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 text-[11px] w-full sm:w-auto overflow-x-auto">
-              <button
-                onClick={() => setPestanaAuditoria('ventas')}
-                className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg font-bold whitespace-nowrap transition ${
-                  pestanaAuditoria === 'ventas' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'
-                }`}
-              >
-                Ventas ({historialVentas.length})
-              </button>
-              <button
-                onClick={() => setPestanaAuditoria('movimientos')}
-                className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg font-bold whitespace-nowrap transition ${
-                  pestanaAuditoria === 'movimientos' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'
-                }`}
-              >
-                Stock ({historialMovimientos.length})
-              </button>
-              <button
-                onClick={() => setPestanaAuditoria('pagos')}
-                className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg font-bold whitespace-nowrap transition ${
-                  pestanaAuditoria === 'pagos' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'
-                }`}
-              >
-                Pagos ({historialPagos.length})
-              </button>
+                </tbody>
+              </table>
             </div>
           </div>
+        )}
 
-          {/* Tabla con Scroll Suave en Móvil */}
-          <div className="overflow-x-auto">
-            {pestanaAuditoria === 'ventas' && (
-              <table className="w-full text-left text-xs sm:text-sm text-slate-300 min-w-[550px]">
-                <thead className="uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
-                  <tr>
-                    <th className="p-2.5">Fecha</th>
-                    <th className="p-2.5">Producto</th>
-                    <th className="p-2.5 text-center">Pzas</th>
-                    <th className="p-2.5">Total</th>
-                    <th className="p-2.5 text-emerald-400">20% Taiyari</th>
-                    <th className="p-2.5 text-rose-400">80% 5F</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {historialVentas.length === 0 ? (
-                    <tr><td colSpan={6} className="p-4 text-center text-slate-500">Sin ventas aún.</td></tr>
-                  ) : (
-                    historialVentas.map((v) => (
+        {/* CONTENIDO 2: ACCIONES (VENTA Y PAGO) */}
+        {seccionActiva === 'acciones' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+            <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
+              <h2 className="text-base sm:text-lg font-bold text-white mb-3">Registrar Venta de Piezas</h2>
+              <form onSubmit={handleRegistrarVenta} className="space-y-3">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Producto</label>
+                  <select
+                    value={prodVenta}
+                    onChange={(e) => setProdVenta(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-200 outline-none focus:border-emerald-500"
+                    required
+                  >
+                    <option value="">Selecciona el producto vendido...</option>
+                    {inventario.map((i) => (
+                      <option key={i.id} value={i.producto_id}>
+                        {i.productos?.nombre} ({i.stock_actual} disp. | ${i.productos?.precio_venta})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Piezas Vendidas</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={cantVenta}
+                    onChange={(e) => setCantVenta(parseInt(e.target.value) || 1)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs sm:text-sm transition"
+                >
+                  Confirmar Salida y Venta
+                </button>
+              </form>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
+              <h2 className="text-base sm:text-lg font-bold text-white mb-3">Reportar Pago a Five Friends</h2>
+              <form onSubmit={handleReportarPago} className="space-y-3">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Monto entregado / transferido (MXN)</label>
+                  <input
+                    type="number"
+                    step="0.50"
+                    required
+                    placeholder="0.00"
+                    value={montoPago}
+                    onChange={(e) => setMontoPago(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Folio o Referencia</label>
+                  <input
+                    type="text"
+                    placeholder="Ej. Transferencia corte lunes"
+                    value={notaPago}
+                    onChange={(e) => setNotaPago(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold py-2.5 rounded-xl text-xs sm:text-sm border border-slate-700 transition"
+                >
+                  Notificar Pago
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* CONTENIDO 3: APROBACIONES DE STOCK Y BAZAR */}
+        {seccionActiva === 'aprobaciones' && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
+            <h2 className="text-base sm:text-lg font-bold text-white">Movimientos Pendientes de Aprobación</h2>
+            <p className="text-xs text-slate-400">
+              Confirma los reabastecimientos que recibes en tienda o las salidas de stock autorizadas para eventos/bazar.
+            </p>
+
+            {recepcionesPendientes.length === 0 ? (
+              <p className="text-xs text-slate-500 py-8 text-center">No tienes mercancía ni movimientos pendientes de confirmar.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {recepcionesPendientes.map((m) => (
+                  <div key={m.id} className="bg-slate-950 border border-slate-800 p-4 rounded-xl flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded font-bold inline-block mb-1 ${
+                        m.tipo === 'alta' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                      }`}>
+                        {m.tipo === 'alta' ? 'Entrada / Reingreso' : 'Salida / Retiro Bazar'}
+                      </span>
+                      <h4 className="text-sm font-semibold text-white truncate">{m.productos?.nombre}</h4>
+                      <p className="text-xs text-amber-400 font-mono font-bold">{m.cantidad} piezas</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">{m.nota || 'Sin notas'}</p>
+                    </div>
+                    <button
+                      onClick={() => handleConfirmarMovimiento(m)}
+                      className="shrink-0 bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold px-3.5 py-2 rounded-xl transition shadow"
+                    >
+                      Confirmar
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* CONTENIDO 4: HISTORIAL Y AUDITORÍA */}
+        {seccionActiva === 'auditoria' && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-white">Historial Auditable</h2>
+                <p className="text-xs text-slate-400">Consulta las ventas registradas, movimientos de inventario y pagos.</p>
+              </div>
+
+              <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 text-[11px] w-full sm:w-auto overflow-x-auto">
+                <button
+                  onClick={() => setSubPestanaAuditoria('ventas')}
+                  className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg font-bold whitespace-nowrap transition ${
+                    subPestanaAuditoria === 'ventas' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'
+                  }`}
+                >
+                  Ventas ({historialVentas.length})
+                </button>
+                <button
+                  onClick={() => setSubPestanaAuditoria('movimientos')}
+                  className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg font-bold whitespace-nowrap transition ${
+                    subPestanaAuditoria === 'movimientos' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'
+                  }`}
+                >
+                  Stock ({historialMovimientos.length})
+                </button>
+                <button
+                  onClick={() => setSubPestanaAuditoria('pagos')}
+                  className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg font-bold whitespace-nowrap transition ${
+                    subPestanaAuditoria === 'pagos' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'
+                  }`}
+                >
+                  Pagos ({historialPagos.length})
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              {subPestanaAuditoria === 'ventas' && (
+                <table className="w-full text-left text-xs sm:text-sm text-slate-300 min-w-[550px]">
+                  <thead className="uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
+                    <tr>
+                      <th className="p-2.5">Fecha</th>
+                      <th className="p-2.5">Producto</th>
+                      <th className="p-2.5 text-center">Pzas</th>
+                      <th className="p-2.5">Total</th>
+                      <th className="p-2.5 text-emerald-400">20% Ganancia</th>
+                      <th className="p-2.5 text-rose-400">80% 5F</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {historialVentas.map((v) => (
                       <tr key={v.id} className="hover:bg-slate-800/40">
                         <td className="p-2.5 text-slate-400 text-[11px] whitespace-nowrap">{new Date(v.creado_en).toLocaleDateString('es-MX')}</td>
                         <td className="p-2.5 font-medium text-slate-100">{v.productos?.nombre}</td>
@@ -531,107 +573,104 @@ export default function PortalTaiyari() {
                         <td className="p-2.5 font-mono text-emerald-400 font-bold">+${Number(v.monto_tienda).toFixed(2)}</td>
                         <td className="p-2.5 font-mono text-rose-400">${Number(v.monto_five_friends).toFixed(2)}</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            )}
+                    ))}
+                  </tbody>
+                </table>
+              )}
 
-            {pestanaAuditoria === 'movimientos' && (
-              <table className="w-full text-left text-xs sm:text-sm text-slate-300 min-w-[550px]">
-                <thead className="uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
-                  <tr>
-                    <th className="p-2.5">Fecha</th>
-                    <th className="p-2.5">Tipo</th>
-                    <th className="p-2.5">Producto</th>
-                    <th className="p-2.5 text-center">Pzas</th>
-                    <th className="p-2.5">Estado</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {historialMovimientos.length === 0 ? (
-                    <tr><td colSpan={5} className="p-4 text-center text-slate-500">Sin movimientos aún.</td></tr>
-                  ) : (
-                    historialMovimientos.map((m) => (
+              {subPestanaAuditoria === 'movimientos' && (
+                <table className="w-full text-left text-xs sm:text-sm text-slate-300 min-w-[550px]">
+                  <thead className="uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
+                    <tr>
+                      <th className="p-2.5">Fecha</th>
+                      <th className="p-2.5">Tipo</th>
+                      <th className="p-2.5">Producto</th>
+                      <th className="p-2.5 text-center">Pzas</th>
+                      <th className="p-2.5">Estado</th>
+                      <th className="p-2.5">Detalle / Razón</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {historialMovimientos.map((m) => (
                       <tr key={m.id} className="hover:bg-slate-800/40">
                         <td className="p-2.5 text-slate-400 text-[11px] whitespace-nowrap">{new Date(m.creado_en).toLocaleDateString('es-MX')}</td>
                         <td className="p-2.5 uppercase font-mono text-[10px]">
                           <span className={`px-1.5 py-0.5 rounded ${m.tipo === 'alta' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
-                            {m.tipo === 'alta' ? 'Entrada' : 'Salida'}
+                            {m.tipo === 'alta' ? 'Entrada' : 'Salida/Bazar'}
                           </span>
                         </td>
                         <td className="p-2.5 font-medium text-slate-100">{m.productos?.nombre}</td>
                         <td className="p-2.5 text-center font-bold">{m.cantidad}</td>
-                        <td className="p-2.5 text-[11px]">{m.estado === 'confirmado' ? '✓ Recibido' : '⏳ Pendiente'}</td>
+                        <td className="p-2.5 text-[11px]">{m.estado === 'confirmado' ? '✓ Confirmado' : '⏳ Pendiente'}</td>
+                        <td className="p-2.5 text-xs text-slate-400">{m.nota || '-'}</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            )}
+                    ))}
+                  </tbody>
+                </table>
+              )}
 
-            {pestanaAuditoria === 'pagos' && (
-              <table className="w-full text-left text-xs sm:text-sm text-slate-300 min-w-[500px]">
-                <thead className="uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
-                  <tr>
-                    <th className="p-2.5">Fecha</th>
-                    <th className="p-2.5">Monto</th>
-                    <th className="p-2.5">Estatus</th>
-                    <th className="p-2.5">Nota</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {historialPagos.length === 0 ? (
-                    <tr><td colSpan={4} className="p-4 text-center text-slate-500">Sin pagos registrados.</td></tr>
-                  ) : (
-                    historialPagos.map((p) => (
+              {subPestanaAuditoria === 'pagos' && (
+                <table className="w-full text-left text-xs sm:text-sm text-slate-300 min-w-[500px]">
+                  <thead className="uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
+                    <tr>
+                      <th className="p-2.5">Fecha</th>
+                      <th className="p-2.5">Monto</th>
+                      <th className="p-2.5">Estatus</th>
+                      <th className="p-2.5">Nota</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {historialPagos.map((p) => (
                       <tr key={p.id} className="hover:bg-slate-800/40">
                         <td className="p-2.5 text-slate-400 text-[11px] whitespace-nowrap">{new Date(p.creado_en).toLocaleDateString('es-MX')}</td>
                         <td className="p-2.5 font-mono font-bold text-white">${Number(p.monto).toFixed(2)}</td>
                         <td className="p-2.5">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.estado === 'aprobado' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
-                            {p.estado === 'aprobado' ? '✓ Aprobado' : '⏳ En revisión'}
+                            {p.estado === 'aprobado' ? '✓ Aprobado por 5F' : '⏳ En revisión'}
                           </span>
                         </td>
                         <td className="p-2.5 text-slate-400 text-xs">{p.nota || '-'}</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-
-        {/* Encargos */}
-        <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
-          <h2 className="text-base sm:text-lg font-bold text-white mb-2">Solicitar Pedidos Especiales</h2>
-          <form onSubmit={handleCrearPedido} className="space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <input
-                type="text"
-                required
-                placeholder="Descripción de la pieza por encargo..."
-                value={descPedido}
-                onChange={(e) => setDescPedido(e.target.value)}
-                className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
-              />
-              <input
-                type="number"
-                min="1"
-                value={piezasPedido}
-                onChange={(e) => setPiezasPedido(parseInt(e.target.value) || 1)}
-                className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
-              />
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
-            <button
-              type="submit"
-              className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-xs sm:text-sm transition w-full sm:w-auto"
-            >
-              Enviar Encargo
-            </button>
-          </form>
-        </div>
+          </div>
+        )}
+
+        {/* CONTENIDO 5: ENCARGOS */}
+        {seccionActiva === 'pedidos' && (
+          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
+            <h2 className="text-base sm:text-lg font-bold text-white mb-2">Solicitar Pedidos Especiales</h2>
+            <p className="text-xs text-slate-400 mb-4">Encarga piezas solicitadas por clientes que no tengas en stock.</p>
+            <form onSubmit={handleCrearPedido} className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <input
+                  type="text"
+                  required
+                  placeholder="Descripción de la pieza, personaje o especificaciones..."
+                  value={descPedido}
+                  onChange={(e) => setDescPedido(e.target.value)}
+                  className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
+                />
+                <input
+                  type="number"
+                  min="1"
+                  value={piezasPedido}
+                  onChange={(e) => setPiezasPedido(parseInt(e.target.value) || 1)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
+                />
+              </div>
+              <button
+                type="submit"
+                className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-xs sm:text-sm transition w-full sm:w-auto"
+              >
+                Enviar Encargo al Taller 5F
+              </button>
+            </form>
+          </div>
+        )}
 
       </main>
     </div>
