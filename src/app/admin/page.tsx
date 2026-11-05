@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import HeaderNav from '@/components/HeaderNav';
 import { supabase } from '@/lib/supabaseClient';
@@ -24,10 +24,10 @@ export default function AdminDashboard() {
   const [movimientosPendientes, setMovimientosPendientes] = useState<any[]>([]);
   const [pagosPendientes, setPagosPendientes] = useState<any[]>([]);
   
-  // Pestañas del Panel Admin
+  // Pestañas
   const [seccionActiva, setSeccionActiva] = useState<'catalogo' | 'movimientos' | 'pagos'>('catalogo');
 
-  // Filtros
+  // Filtros del catálogo
   const [busqueda, setBusqueda] = useState('');
   const [categoriaFiltro, setCategoriaFiltro] = useState('todas');
   const [orden, setOrden] = useState<'nombre' | 'stock_desc' | 'precio_desc'>('nombre');
@@ -41,12 +41,17 @@ export default function AdminDashboard() {
   const [formCategoria, setFormCategoria] = useState('Figuras');
   const [formPrecio, setFormPrecio] = useState('0.00');
 
-  // Envíos regulares y Bazar
+  // Operaciones de Stock / Bazar con Autocompletado Predictivo
   const [tiendaOperacion, setTiendaOperacion] = useState('taiyari');
   const [prodSeleccionado, setProdSeleccionado] = useState('');
   const [cantOperacion, setCantOperacion] = useState(1);
   const [tipoMovimiento, setTipoMovimiento] = useState<'alta' | 'baja_bazar' | 'retorno_bazar'>('alta');
   const [notaMovimiento, setNotaMovimiento] = useState('');
+
+  // Estados específicos del Buscador Predictivo
+  const [textoBusquedaProd, setTextoBusquedaProd] = useState('');
+  const [menuDesplegableAbierto, setMenuDesplegableAbierto] = useState(false);
+  const contenedorBuscadorRef = useRef<HTMLDivElement>(null);
 
   // Renta mensual Haruss
   const [periodoRenta, setPeriodoRenta] = useState('2026-11');
@@ -60,6 +65,20 @@ export default function AdminDashboard() {
       cargarDatos();
     }
   }, [autorizado]);
+
+  // Cerrar menú predictivo si el usuario hace clic afuera
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        contenedorBuscadorRef.current &&
+        !contenedorBuscadorRef.current.contains(event.target as Node)
+      ) {
+        setMenuDesplegableAbierto(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const verificarSesionAdmin = async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -130,7 +149,22 @@ export default function AdminDashboard() {
     if (pagos) setPagosPendientes(pagos);
   };
 
-  // Guardar (Crear o Editar Producto)
+  // Sugerencias predictivas filtradas conforme escribes (busca por nombre o SKU)
+  const sugerenciasPredictivas = useMemo(() => {
+    if (!textoBusquedaProd.trim()) return [];
+    const busqLimpia = textoBusquedaProd.toLowerCase();
+    return productos.filter((p) =>
+      p.nombre.toLowerCase().includes(busqLimpia) ||
+      p.sku.toLowerCase().includes(busqLimpia)
+    ).slice(0, 10); // Límite de 10 sugerencias para fluidez visual
+  }, [productos, textoBusquedaProd]);
+
+  const seleccionarProductoPredictivo = (prod: ItemInventario) => {
+    setProdSeleccionado(prod.id);
+    setTextoBusquedaProd(`[${prod.sku}] ${prod.nombre}`);
+    setMenuDesplegableAbierto(false);
+  };
+
   const handleGuardarProducto = async (e: React.FormEvent) => {
     e.preventDefault();
     const precio = parseFloat(formPrecio) || 0;
@@ -168,7 +202,6 @@ export default function AdminDashboard() {
         return;
       }
 
-      // Inicializar stock en 0 en ambas tiendas
       if (data) {
         await supabase.from('inventario_tienda').insert([
           { tienda_id: 'taiyari', producto_id: data.id, stock_actual: 0 },
@@ -221,11 +254,10 @@ export default function AdminDashboard() {
     cargarDatos();
   };
 
-  // Registrar Operación de Stock (Envío Regular, Retiro Bazar, Retorno Bazar)
   const handleRegistrarOperacionStock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prodSeleccionado) {
-      alert('Por favor selecciona un producto.');
+      alert('Por favor selecciona un producto escribiendo su nombre en el buscador.');
       return;
     }
 
@@ -259,6 +291,7 @@ export default function AdminDashboard() {
 
     alert('Operación enviada. La tienda deberá confirmarla para que se aplique en su stock.');
     setProdSeleccionado('');
+    setTextoBusquedaProd('');
     setCantOperacion(1);
     setNotaMovimiento('');
     cargarDatos();
@@ -376,7 +409,7 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        {/* MENÚ DE SECCIONES LIMPIO Y COMPACTO */}
+        {/* Menú de Secciones */}
         <div className="flex items-center gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs sm:text-sm overflow-x-auto">
           <button
             onClick={() => setSeccionActiva('catalogo')}
@@ -404,7 +437,7 @@ export default function AdminDashboard() {
           </button>
         </div>
 
-        {/* SECCIÓN 1: CATÁLOGO CON AGREGAR, EDITAR Y ELIMINAR */}
+        {/* SECCIÓN 1: CATÁLOGO */}
         {seccionActiva === 'catalogo' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
@@ -420,7 +453,7 @@ export default function AdminDashboard() {
               </button>
             </div>
 
-            {/* Barra de Búsqueda y Filtros */}
+            {/* Barra de Filtros */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
               <input
                 type="text"
@@ -498,7 +531,7 @@ export default function AdminDashboard() {
               )}
             </div>
 
-            {/* Vista Laptops / Tabletas (Tabla Completa) */}
+            {/* Vista Tabla Completa */}
             <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left text-sm text-slate-300">
                 <thead className="text-xs uppercase bg-slate-950 text-slate-400 border-b border-slate-800">
@@ -528,14 +561,12 @@ export default function AdminDashboard() {
                           <button
                             onClick={() => abrirModalEditar(prod)}
                             className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-2.5 py-1 rounded-md border border-slate-700"
-                            title="Editar información"
                           >
                             ✏️ Editar
                           </button>
                           <button
                             onClick={() => handleEliminarProducto(prod)}
                             className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs px-2 py-1 rounded-md border border-rose-500/30"
-                            title="Eliminar del catálogo"
                           >
                             🗑️
                           </button>
@@ -549,13 +580,13 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* SECCIÓN 2: REABASTECIMIENTO Y MOVIMIENTOS DE BAZAR */}
+        {/* SECCIÓN 2: REABASTECIMIENTO Y BAZAR CON BUSCADOR PREDICTIVO */}
         {seccionActiva === 'movimientos' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
               <h2 className="text-base sm:text-lg font-bold text-white mb-2">Operaciones de Stock y Bazar</h2>
               <p className="text-xs text-slate-400 mb-4">
-                Envía inventario nuevo o gestiona salidas/retornos temporales para ventas de bazar.
+                Escribe para autocompletar el producto al instante sin tener que buscar en listas largas.
               </p>
 
               <form onSubmit={handleRegistrarOperacionStock} className="space-y-4">
@@ -577,7 +608,9 @@ export default function AdminDashboard() {
                     <label className="text-xs text-slate-400 block mb-1">Tienda Afectada</label>
                     <select
                       value={tiendaOperacion}
-                      onChange={(e) => setTiendaOperacion(e.target.value)}
+                      onChange={(e) => {
+                        setTiendaOperacion(e.target.value);
+                      }}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm"
                     >
                       <option value="taiyari">Taiyari Multimarcas</option>
@@ -596,28 +629,77 @@ export default function AdminDashboard() {
                   </div>
                 </div>
 
-                <div>
-                  <label className="text-xs text-slate-400 block mb-1">Producto</label>
-                  <select
-                    value={prodSeleccionado}
-                    onChange={(e) => setProdSeleccionado(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm"
-                    required
-                  >
-                    <option value="">Selecciona el producto...</option>
-                    {productos.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        [{p.sku}] {p.nombre} (Stock {tiendaOperacion}: {tiendaOperacion === 'taiyari' ? p.stock_taiyari : p.stock_haruss})
-                      </option>
-                    ))}
-                  </select>
+                {/* BUSCADOR PREDICTIVO AUTOCOMPLETE */}
+                <div ref={contenedorBuscadorRef} className="relative">
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Buscar Producto (Escribe para autocompletar)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Ej. Escribe 'po', 'drag', 'calab'..."
+                      value={textoBusquedaProd}
+                      onFocus={() => setMenuDesplegableAbierto(true)}
+                      onChange={(e) => {
+                        setTextoBusquedaProd(e.target.value);
+                        setProdSeleccionado('');
+                        setMenuDesplegableAbierto(true);
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                    />
+                    {prodSeleccionado && (
+                      <span className="absolute right-3 top-2.5 text-xs text-emerald-400 font-bold">
+                        ✓ Seleccionado
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Menú de Coincidencias en Tiempo Real */}
+                  {menuDesplegableAbierto && sugerenciasPredictivas.length > 0 && (
+                    <div className="absolute left-0 right-0 mt-1.5 max-h-56 overflow-y-auto bg-slate-950 border border-slate-700/80 rounded-xl shadow-2xl z-50 divide-y divide-slate-800">
+                      {sugerenciasPredictivas.map((p) => {
+                        const stockTiendaActual = tiendaOperacion === 'taiyari' ? p.stock_taiyari : p.stock_haruss;
+                        return (
+                          <button
+                            type="button"
+                            key={p.id}
+                            onClick={() => seleccionarProductoPredictivo(p)}
+                            className="w-full text-left p-3 hover:bg-slate-900 transition flex items-center justify-between gap-3 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <span className="text-[10px] text-slate-500 font-mono block">
+                                {p.categoria} • {p.sku}
+                              </span>
+                              <p className="font-semibold text-slate-200 truncate mt-0.5">
+                                {p.nombre}
+                              </p>
+                            </div>
+                            <div className="text-right shrink-0 bg-slate-900/80 border border-slate-800 px-2.5 py-1 rounded-lg">
+                              <span className="text-[10px] text-slate-400 font-mono block capitalize">
+                                En {tiendaOperacion}
+                              </span>
+                              <span className="font-bold text-amber-400">
+                                {stockTiendaActual} pzas
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {menuDesplegableAbierto && textoBusquedaProd.trim() !== '' && sugerenciasPredictivas.length === 0 && (
+                    <div className="absolute left-0 right-0 mt-1.5 p-3 bg-slate-950 border border-slate-800 rounded-xl text-center text-xs text-slate-500 z-50">
+                      No hay coincidencias con &quot;{textoBusquedaProd}&quot;
+                    </div>
+                  )}
                 </div>
 
                 <div>
                   <label className="text-xs text-slate-400 block mb-1">Nota o Razón del Movimiento</label>
                   <input
                     type="text"
-                    placeholder="Ej. Bazar fin de semana en Parque Tezozómoc"
+                    placeholder="Ej. Retiro para bazar en Parque Tezozómoc"
                     value={notaMovimiento}
                     onChange={(e) => setNotaMovimiento(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm"
@@ -626,18 +708,18 @@ export default function AdminDashboard() {
 
                 <button
                   type="submit"
-                  className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold py-3 rounded-xl text-xs sm:text-sm transition"
+                  className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold py-3 rounded-xl text-xs sm:text-sm transition shadow-lg"
                 >
                   Registrar Operación (En espera de confirmación)
                 </button>
               </form>
             </div>
 
-            {/* Historial de Movimientos Pendientes de Aprobación */}
+            {/* Historial de Movimientos Pendientes */}
             <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl space-y-3">
               <h3 className="text-base sm:text-lg font-bold text-white">Movimientos por Aprobar en Tiendas</h3>
               <p className="text-xs text-slate-400">
-                La tienda debe pulsar &quot;Confirmar&quot; en su respectivo portal para que el stock se ajuste formalmente.
+                La tienda debe pulsar &quot;Confirmar&quot; en su portal para que el inventario se descuente o sume en automático.
               </p>
 
               {movimientosPendientes.length === 0 ? (
@@ -666,7 +748,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* SECCIÓN 3: PAGOS DE MERCANCÍA Y CONTROL DE RENTA */}
+        {/* SECCIÓN 3: PAGOS Y RENTAS */}
         {seccionActiva === 'pagos' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl space-y-4">
