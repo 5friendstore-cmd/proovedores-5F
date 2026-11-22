@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import HeaderNav from '@/components/HeaderNav';
-import { supabase, calcularTotalVenta } from '@/lib/supabaseClient';
+import { supabase, calcularTotalVenta, obtenerProximoCorte } from '@/lib/supabaseClient';
 
 export default function PortalTaiyari() {
   const router = useRouter();
@@ -13,7 +13,6 @@ export default function PortalTaiyari() {
   const [inventario, setInventario] = useState<any[]>([]);
   const [recepcionesPendientes, setRecepcionesPendientes] = useState<any[]>([]);
   
-  // Pestaña activa del portal de Taiyari
   const [seccionActiva, setSeccionActiva] = useState<'inventario' | 'acciones' | 'aprobaciones' | 'auditoria' | 'pedidos'>('inventario');
 
   // Auditoría
@@ -25,18 +24,35 @@ export default function PortalTaiyari() {
   // Filtros de Inventario
   const [busqueda, setBusqueda] = useState('');
   const [categoriaFiltro, setCategoriaFiltro] = useState('todas');
+  const [soloExistencia, setSoloExistencia] = useState(true);
   const [orden, setOrden] = useState<'nombre' | 'stock_desc' | 'precio_desc'>('nombre');
 
-  // Formularios
+  // Formularios y Buscador Desplegable de Venta
   const [prodVenta, setProdVenta] = useState('');
+  const [textoBusquedaVenta, setTextoBusquedaVenta] = useState('');
+  const [dropdownVentaAbierto, setDropdownVentaAbierto] = useState(false);
+  const ventaDropdownRef = useRef<HTMLDivElement>(null);
+
   const [cantVenta, setCantVenta] = useState(1);
   const [descPedido, setDescPedido] = useState('');
   const [piezasPedido, setPiezasPedido] = useState(1);
   const [montoPago, setMontoPago] = useState('');
   const [notaPago, setNotaPago] = useState('');
 
+  const proximoCorte = useMemo(() => obtenerProximoCorte('taiyari'), []);
+
   useEffect(() => {
     verificarSesion();
+  }, []);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ventaDropdownRef.current && !ventaDropdownRef.current.contains(e.target as Node)) {
+        setDropdownVentaAbierto(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   const verificarSesion = async () => {
@@ -53,17 +69,32 @@ export default function PortalTaiyari() {
     const { data: t } = await supabase.from('tiendas').select('*').eq('id', 'taiyari').single();
     if (t) setInfoTienda(t);
 
+    // Traer catálogo completo combinado con inventario de Taiyari
+    const { data: prods } = await supabase.from('productos').select('*').order('nombre', { ascending: true });
     const { data: inv } = await supabase
       .from('inventario_tienda')
-      .select('*, productos(*)')
+      .select('*')
       .eq('tienda_id', 'taiyari');
-    if (inv) setInventario(inv);
+
+    if (prods) {
+      const listaCompleta = prods.map((p) => {
+        const reg = inv?.find((i) => i.producto_id === p.id);
+        return {
+          id: reg?.id || `temp-${p.id}`,
+          producto_id: p.id,
+          stock_actual: reg ? reg.stock_actual : 0,
+          productos: p,
+        };
+      });
+      setInventario(listaCompleta);
+    }
 
     const { data: rec } = await supabase
       .from('movimientos_stock')
-      .select('*, productos(nombre)')
+      .select('*, productos(nombre, sku)')
       .eq('tienda_id', 'taiyari')
-      .eq('estado', 'pendiente_recepcion');
+      .eq('estado', 'pendiente_recepcion')
+      .order('creado_en', { ascending: false });
     if (rec) setRecepcionesPendientes(rec);
 
     const { data: ventas } = await supabase
@@ -107,39 +138,73 @@ export default function PortalTaiyari() {
   const productosFiltrados = useMemo(() => {
     return inventario
       .filter(item => {
+        const coincideExistencia = soloExistencia ? item.stock_actual > 0 : true;
         const coincideTexto = 
           item.productos?.nombre?.toLowerCase().includes(busqueda.toLowerCase()) ||
           item.productos?.sku?.toLowerCase().includes(busqueda.toLowerCase());
         const coincideCat = categoriaFiltro === 'todas' || item.productos?.categoria === categoriaFiltro;
-        return coincideTexto && coincideCat;
+        return coincideExistencia && coincideTexto && coincideCat;
       })
       .sort((a, b) => {
         if (orden === 'stock_desc') return b.stock_actual - a.stock_actual;
         if (orden === 'precio_desc') return (b.productos?.precio_venta || 0) - (a.productos?.precio_venta || 0);
         return (a.productos?.nombre || '').localeCompare(b.productos?.nombre || '');
       });
-  }, [inventario, busqueda, categoriaFiltro, orden]);
+  }, [inventario, busqueda, categoriaFiltro, soloExistencia, orden]);
 
-  // Confirmar Reabastecimiento o Retiro/Retorno de Bazar
+  // Opciones desplegables filtradas para registrar venta (solo con stock > 0)
+  const opcionesVentaFiltradas = useMemo(() => {
+    const disponibles = inventario.filter(i => i.stock_actual > 0);
+    if (!textoBusquedaVenta.trim()) return disponibles;
+    const q = textoBusquedaVenta.toLowerCase();
+    return disponibles.filter(i =>
+      i.productos?.nombre?.toLowerCase().includes(q) ||
+      i.productos?.sku?.toLowerCase().includes(q)
+    );
+  }, [inventario, textoBusquedaVenta]);
+
+  // Confirmar movimiento y actualizar inventario real de forma segura
   const handleConfirmarMovimiento = async (mov: any) => {
+    // 1. Consultar stock actual directo en BD para evitar desfaces
+    const { data: registroActual } = await supabase
+      .from('inventario_tienda')
+      .select('id, stock_actual')
+      .eq('tienda_id', 'taiyari')
+      .eq('producto_id', mov.producto_id)
+      .maybeSingle();
+
+    const stockPrevio = registroActual?.stock_actual || 0;
+    const nuevoStock = mov.tipo === 'alta'
+      ? stockPrevio + mov.cantidad
+      : Math.max(0, stockPrevio - mov.cantidad);
+
+    // 2. Actualizar o insertar en inventario_tienda
+    if (registroActual?.id) {
+      const { error: errUpd } = await supabase
+        .from('inventario_tienda')
+        .update({ stock_actual: nuevoStock, actualizado_en: new Date().toISOString() })
+        .eq('id', registroActual.id);
+      if (errUpd) {
+        alert('Error al actualizar inventario: ' + errUpd.message);
+        return;
+      }
+    } else {
+      const { error: errIns } = await supabase
+        .from('inventario_tienda')
+        .insert({ tienda_id: 'taiyari', producto_id: mov.producto_id, stock_actual: nuevoStock });
+      if (errIns) {
+        alert('Error al insertar inventario: ' + errIns.message);
+        return;
+      }
+    }
+
+    // 3. Marcar movimiento como confirmado
     await supabase
       .from('movimientos_stock')
       .update({ estado: 'confirmado', confirmado_en: new Date().toISOString() })
       .eq('id', mov.id);
 
-    const item = inventario.find((i) => i.producto_id === mov.producto_id);
-    const stockActual = item?.stock_actual || 0;
-    
-    // Si el movimiento es 'alta' se suma; si es 'baja' (retiro bazar) se resta
-    const nuevoStock = mov.tipo === 'alta' 
-      ? stockActual + mov.cantidad 
-      : Math.max(0, stockActual - mov.cantidad);
-
-    await supabase
-      .from('inventario_tienda')
-      .upsert({ tienda_id: 'taiyari', producto_id: mov.producto_id, stock_actual: nuevoStock });
-
-    alert('Movimiento confirmado y reflejado en tu stock disponible.');
+    alert(`Movimiento confirmado. Nuevo stock de "${mov.productos?.nombre}": ${nuevoStock} piezas.`);
     cargarPortal();
   };
 
@@ -147,7 +212,7 @@ export default function PortalTaiyari() {
     e.preventDefault();
     const itemInv = inventario.find((i) => i.producto_id === prodVenta);
     if (!itemInv || itemInv.stock_actual < cantVenta) {
-      alert('Stock insuficiente para registrar la venta.');
+      alert('Selecciona un producto válido con stock suficiente.');
       return;
     }
 
@@ -173,12 +238,15 @@ export default function PortalTaiyari() {
 
     await supabase
       .from('inventario_tienda')
-      .update({ stock_actual: itemInv.stock_actual - cantVenta })
-      .eq('id', itemInv.id);
+      .update({ stock_actual: itemInv.stock_actual - cantVenta, actualizado_en: new Date().toISOString() })
+      .eq('tienda_id', 'taiyari')
+      .eq('producto_id', prodVenta);
 
     const msjDetalle = detallePromocion ? ` (${detallePromocion})` : '';
-    alert(`Venta registrada exitosamente.${msjDetalle}\nTotal: $${total.toFixed(2)} MXN\nComisión Taiyari: $${montoTienda.toFixed(2)} MXN\nFive Friends: $${monto5F.toFixed(2)} MXN`);
+    alert(`Venta registrada.${msjDetalle}\nTotal: $${total.toFixed(2)} MXN\nTu comisión (20%): $${montoTienda.toFixed(2)} MXN\nA liquidar 5F (80%): $${monto5F.toFixed(2)} MXN`);
 
+    setProdVenta('');
+    setTextoBusquedaVenta('');
     setCantVenta(1);
     cargarPortal();
   };
@@ -193,7 +261,7 @@ export default function PortalTaiyari() {
     });
     setMontoPago('');
     setNotaPago('');
-    alert('Comprobante de pago notificado a Five Friends.');
+    alert('Pago reportado a Five Friends para su validación.');
     cargarPortal();
   };
 
@@ -220,58 +288,71 @@ export default function PortalTaiyari() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <HeaderNav titulo="Taiyari Multimarcas" rol="taiyari" />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-5">
         
-        {/* Cabecera Comercial */}
-        <div className="bg-gradient-to-r from-slate-900 to-slate-800 border border-slate-800 p-4 sm:p-6 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">Taiyari Multimarcas</h1>
-            <p className="text-xs sm:text-sm text-slate-400 mt-1">
-              Consignación: <span className="text-emerald-400 font-semibold">20% ganancia</span> por venta | 80% liquidación 5F
-            </p>
+        {/* RECORDATORIO INTELIGENTE DE CORTE */}
+        <div className={`border p-3.5 sm:p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 ${
+          proximoCorte.esHoy || proximoCorte.esManana
+            ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
+            : 'bg-slate-900 border-slate-800 text-slate-300'
+        }`}>
+          <div className="flex items-center gap-2.5">
+            <span className="text-lg">📅</span>
+            <div>
+              <p className="text-xs sm:text-sm font-bold text-white">
+                {proximoCorte.esHoy
+                  ? '¡Hoy toca visita y corte quincenal!'
+                  : proximoCorte.esManana
+                  ? 'Recordatorio: Mañana es día de corte quincenal'
+                  : `Próximo corte quincenal: ${proximoCorte.fechaTexto}`}
+              </p>
+              <p className="text-[11px] text-slate-400">
+                {proximoCorte.diasRestantes === 0
+                  ? 'Prepara el reporte de ventas y liquidación del 80%.'
+                  : `Faltan ${proximoCorte.diasRestantes} día(s) • Esquema 20% comisión`}
+              </p>
+            </div>
           </div>
-          <div className="w-full sm:w-auto bg-slate-950/60 border border-slate-800/80 px-3.5 py-2 rounded-xl text-left sm:text-right">
-            <span className="text-[10px] uppercase font-mono text-slate-400 block">Día de Visita / Corte</span>
-            <span className="text-xs sm:text-sm font-bold text-amber-400">Lunes alternados (Quincenal)</span>
-          </div>
+          {saldoPendientePorPagar > 0 && (
+            <span className="text-xs font-mono bg-rose-500/20 text-rose-300 border border-rose-500/30 px-3 py-1 rounded-lg font-bold">
+              Saldo por liquidar: ${saldoPendientePorPagar.toFixed(2)} MXN
+            </span>
+          )}
         </div>
 
         {/* Tarjetas Financieras */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-          <div className="bg-slate-900 border border-emerald-500/30 p-4 sm:p-5 rounded-2xl bg-emerald-500/5">
+          <div className="bg-slate-900 border border-emerald-500/30 p-4 rounded-2xl bg-emerald-500/5">
             <span className="text-[11px] text-emerald-400 uppercase font-mono font-bold block">Tus Ganancias (20%)</span>
             <p className="text-2xl font-extrabold text-emerald-400 mt-1">
               ${totalComisionGanada.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-400 block mt-1">Acumulado por ventas</span>
           </div>
 
-          <div className="bg-slate-900 border border-rose-500/30 p-4 sm:p-5 rounded-2xl bg-rose-500/5">
+          <div className="bg-slate-900 border border-rose-500/30 p-4 rounded-2xl bg-rose-500/5">
             <span className="text-[11px] text-rose-400 uppercase font-mono font-bold block">Saldo Pendiente a 5F</span>
             <p className="text-2xl font-extrabold text-rose-400 mt-1">
               ${saldoPendientePorPagar.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-400 block mt-1">Incluye saldo base $665.00</span>
+            <span className="text-[10px] text-slate-400 block mt-0.5">Incluye $665.00 adeudo inicial</span>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
             <span className="text-[11px] text-slate-400 uppercase font-mono block">Pagado Aprobado</span>
             <p className="text-2xl font-extrabold text-slate-200 mt-1">
               ${totalPagadoAprobado.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-500 block mt-1">Confirmado por 5F</span>
           </div>
 
-          <div className="bg-slate-900 border border-amber-500/30 p-4 sm:p-5 rounded-2xl bg-amber-500/5">
+          <div className="bg-slate-900 border border-amber-500/30 p-4 rounded-2xl bg-amber-500/5">
             <span className="text-[11px] text-amber-400 uppercase font-mono font-bold block">Pagos en Revisión</span>
             <p className="text-2xl font-extrabold text-amber-400 mt-1">
               ${totalPagosPendientes.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-400 block mt-1">Pendientes de confirmación</span>
           </div>
         </div>
 
-        {/* MENÚ DE PESTAÑAS INTUITIVO */}
+        {/* Menú de Pestañas */}
         <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs sm:text-sm overflow-x-auto">
           <button
             onClick={() => setSeccionActiva('inventario')}
@@ -287,15 +368,19 @@ export default function PortalTaiyari() {
               seccionActiva === 'acciones' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
             }`}
           >
-            ⚡ Registrar Venta / Pago
+            ⚡ Venta / Pago
           </button>
           <button
             onClick={() => setSeccionActiva('aprobaciones')}
-            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap relative ${
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap ${
               seccionActiva === 'aprobaciones' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
             }`}
           >
-            🔔 Aprobaciones {recepcionesPendientes.length > 0 && <span className="w-2 h-2 rounded-full bg-rose-500 inline-block ml-1"></span>}
+            🔔 Aprobaciones {recepcionesPendientes.length > 0 && (
+              <span className="ml-1 bg-rose-600 text-white text-[10px] px-1.5 py-0.5 rounded-full">
+                {recepcionesPendientes.length}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setSeccionActiva('auditoria')}
@@ -315,15 +400,26 @@ export default function PortalTaiyari() {
           </button>
         </div>
 
-        {/* CONTENIDO 1: INVENTARIO */}
+        {/* 1. INVENTARIO CON BOTÓN "SOLO EN EXISTENCIA" */}
         {seccionActiva === 'inventario' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-white">Stock Disponible en Tienda</h2>
-                <p className="text-xs text-slate-400">Total en tienda: {inventario.reduce((acc, i) => acc + (i.stock_actual || 0), 0)} piezas</p>
+                <h2 className="text-base sm:text-lg font-bold text-white">Catálogo e Inventario en Tienda</h2>
+                <p className="text-xs text-slate-400">
+                  Piezas físicas totales: {inventario.reduce((acc, i) => acc + (i.stock_actual || 0), 0)} unidades
+                </p>
               </div>
-              <span className="text-xs text-amber-400 font-mono">Mostrando {productosFiltrados.length} piezas</span>
+              <button
+                onClick={() => setSoloExistencia(!soloExistencia)}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition flex items-center gap-2 ${
+                  soloExistencia
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                    : 'bg-slate-950 border-slate-800 text-slate-400'
+                }`}
+              >
+                <span>{soloExistencia ? '✓ Mostrando solo en existencia' : 'Mostrar todos (incluye 0 stock)'}</span>
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
@@ -356,19 +452,25 @@ export default function PortalTaiyari() {
 
             {/* Móvil */}
             <div className="grid grid-cols-1 gap-2.5 md:hidden">
-              {productosFiltrados.map((item) => (
-                <div key={item.id} className="bg-slate-950/70 border border-slate-800/80 p-3 rounded-xl flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <span className="text-[10px] text-slate-500 uppercase font-mono block truncate">{item.productos?.categoria} • {item.productos?.sku}</span>
-                    <h4 className="text-sm font-semibold text-slate-100 truncate mt-0.5">{item.productos?.nombre}</h4>
-                    <p className="text-xs text-amber-400 font-mono mt-0.5">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</p>
+              {productosFiltrados.length === 0 ? (
+                <p className="text-center text-slate-500 text-xs py-6">No hay productos con esos filtros.</p>
+              ) : (
+                productosFiltrados.map((item) => (
+                  <div key={item.id} className="bg-slate-950/70 border border-slate-800/80 p-3 rounded-xl flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="text-[10px] text-slate-500 uppercase font-mono block truncate">{item.productos?.categoria} • {item.productos?.sku}</span>
+                      <h4 className="text-sm font-semibold text-slate-100 truncate mt-0.5">{item.productos?.nombre}</h4>
+                      <p className="text-xs text-amber-400 font-mono mt-0.5">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</p>
+                    </div>
+                    <div className="text-right shrink-0 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg">
+                      <span className="text-[10px] text-slate-400 block font-mono">Stock</span>
+                      <span className={`text-base font-extrabold ${item.stock_actual > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                        {item.stock_actual}
+                      </span>
+                    </div>
                   </div>
-                  <div className="text-right shrink-0 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block font-mono">Stock</span>
-                    <span className="text-base font-extrabold text-amber-400">{item.stock_actual}</span>
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Laptop */}
@@ -390,7 +492,9 @@ export default function PortalTaiyari() {
                       <td className="p-3 font-medium text-slate-100">{item.productos?.nombre}</td>
                       <td className="p-3 font-mono text-xs text-slate-400">{item.productos?.sku}</td>
                       <td className="p-3 font-mono">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</td>
-                      <td className="p-3 text-right font-bold text-amber-400">{item.stock_actual}</td>
+                      <td className={`p-3 text-right font-bold ${item.stock_actual > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                        {item.stock_actual}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -399,28 +503,68 @@ export default function PortalTaiyari() {
           </div>
         )}
 
-        {/* CONTENIDO 2: ACCIONES (VENTA Y PAGO) */}
+        {/* 2. ACCIONES CON BUSCADOR DESPLEGABLE INTERACTIVO */}
         {seccionActiva === 'acciones' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
             <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
               <h2 className="text-base sm:text-lg font-bold text-white mb-3">Registrar Venta de Piezas</h2>
               <form onSubmit={handleRegistrarVenta} className="space-y-3">
-                <div>
-                  <label className="text-xs text-slate-400 block mb-1">Producto</label>
-                  <select
-                    value={prodVenta}
-                    onChange={(e) => setProdVenta(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-200 outline-none focus:border-emerald-500"
-                    required
-                  >
-                    <option value="">Selecciona el producto vendido...</option>
-                    {inventario.map((i) => (
-                      <option key={i.id} value={i.producto_id}>
-                        {i.productos?.nombre} ({i.stock_actual} disp. | ${i.productos?.precio_venta})
-                      </option>
-                    ))}
-                  </select>
+                <div ref={ventaDropdownRef} className="relative">
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Producto (Escribe para filtrar o haz clic para ver lista)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="🔍 Escribe el nombre o despliega lista..."
+                      value={textoBusquedaVenta}
+                      onFocus={() => setDropdownVentaAbierto(true)}
+                      onChange={(e) => {
+                        setTextoBusquedaVenta(e.target.value);
+                        setProdVenta('');
+                        setDropdownVentaAbierto(true);
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setDropdownVentaAbierto(!dropdownVentaAbierto)}
+                      className="absolute right-3 top-2.5 text-slate-400 text-xs"
+                    >
+                      ▼
+                    </button>
+                  </div>
+
+                  {dropdownVentaAbierto && (
+                    <div className="absolute left-0 right-0 mt-1.5 max-h-60 overflow-y-auto bg-slate-950 border border-slate-700 rounded-xl shadow-2xl z-50 divide-y divide-slate-800">
+                      {opcionesVentaFiltradas.length === 0 ? (
+                        <div className="p-3 text-xs text-slate-500 text-center">No hay piezas disponibles con ese nombre.</div>
+                      ) : (
+                        opcionesVentaFiltradas.map((item) => (
+                          <button
+                            type="button"
+                            key={item.producto_id}
+                            onClick={() => {
+                              setProdVenta(item.producto_id);
+                              setTextoBusquedaVenta(`${item.productos?.nombre} ($${item.productos?.precio_venta} MXN)`);
+                              setDropdownVentaAbierto(false);
+                            }}
+                            className="w-full text-left p-3 hover:bg-slate-900 transition flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-semibold text-slate-100 block truncate">{item.productos?.nombre}</span>
+                              <span className="text-[10px] text-slate-500 font-mono">${item.productos?.precio_venta} MXN c/u</span>
+                            </div>
+                            <span className="shrink-0 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-mono font-bold">
+                              {item.stock_actual} disp.
+                            </span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
                 </div>
+
                 <div>
                   <label className="text-xs text-slate-400 block mb-1">Piezas Vendidas</label>
                   <input
@@ -476,16 +620,16 @@ export default function PortalTaiyari() {
           </div>
         )}
 
-        {/* CONTENIDO 3: APROBACIONES DE STOCK Y BAZAR */}
+        {/* 3. APROBACIONES DE MOVIMIENTOS */}
         {seccionActiva === 'aprobaciones' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
-            <h2 className="text-base sm:text-lg font-bold text-white">Movimientos Pendientes de Aprobación</h2>
+            <h2 className="text-base sm:text-lg font-bold text-white">Movimientos Pendientes de Confirmación</h2>
             <p className="text-xs text-slate-400">
-              Confirma los reabastecimientos que recibes en tienda o las salidas de stock autorizadas para eventos/bazar.
+              Al confirmar, el inventario físico de tu tienda se actualizará en automático.
             </p>
 
             {recepcionesPendientes.length === 0 ? (
-              <p className="text-xs text-slate-500 py-8 text-center">No tienes mercancía ni movimientos pendientes de confirmar.</p>
+              <p className="text-xs text-slate-500 py-8 text-center">No tienes movimientos pendientes por aprobar.</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {recepcionesPendientes.map((m) => (
@@ -494,10 +638,9 @@ export default function PortalTaiyari() {
                       <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded font-bold inline-block mb-1 ${
                         m.tipo === 'alta' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                       }`}>
-                        {m.tipo === 'alta' ? 'Entrada / Reingreso' : 'Salida / Retiro Bazar'}
+                        {m.tipo === 'alta' ? `+${m.cantidad} Entrada / Reingreso` : `-${m.cantidad} Retiro Bazar`}
                       </span>
                       <h4 className="text-sm font-semibold text-white truncate">{m.productos?.nombre}</h4>
-                      <p className="text-xs text-amber-400 font-mono font-bold">{m.cantidad} piezas</p>
                       <p className="text-[11px] text-slate-400 mt-0.5">{m.nota || 'Sin notas'}</p>
                     </div>
                     <button
@@ -513,13 +656,12 @@ export default function PortalTaiyari() {
           </div>
         )}
 
-        {/* CONTENIDO 4: HISTORIAL Y AUDITORÍA */}
+        {/* 4. AUDITORÍA E HISTORIAL */}
         {seccionActiva === 'auditoria' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
               <div>
                 <h2 className="text-base sm:text-lg font-bold text-white">Historial Auditable</h2>
-                <p className="text-xs text-slate-400">Consulta las ventas registradas, movimientos de inventario y pagos.</p>
               </div>
 
               <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 text-[11px] w-full sm:w-auto overflow-x-auto">
@@ -626,7 +768,7 @@ export default function PortalTaiyari() {
                         <td className="p-2.5 font-mono font-bold text-white">${Number(p.monto).toFixed(2)}</td>
                         <td className="p-2.5">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.estado === 'aprobado' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
-                            {p.estado === 'aprobado' ? '✓ Aprobado por 5F' : '⏳ En revisión'}
+                            {p.estado === 'aprobado' ? '✓ Aprobado' : '⏳ En revisión'}
                           </span>
                         </td>
                         <td className="p-2.5 text-slate-400 text-xs">{p.nota || '-'}</td>
@@ -639,17 +781,16 @@ export default function PortalTaiyari() {
           </div>
         )}
 
-        {/* CONTENIDO 5: ENCARGOS */}
+        {/* 5. ENCARGOS */}
         {seccionActiva === 'pedidos' && (
           <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
             <h2 className="text-base sm:text-lg font-bold text-white mb-2">Solicitar Pedidos Especiales</h2>
-            <p className="text-xs text-slate-400 mb-4">Encarga piezas solicitadas por clientes que no tengas en stock.</p>
             <form onSubmit={handleCrearPedido} className="space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                 <input
                   type="text"
                   required
-                  placeholder="Descripción de la pieza, personaje o especificaciones..."
+                  placeholder="Descripción de la pieza..."
                   value={descPedido}
                   onChange={(e) => setDescPedido(e.target.value)}
                   className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
