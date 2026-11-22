@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import HeaderNav from '@/components/HeaderNav';
-import { supabase, calcularTotalVenta } from '@/lib/supabaseClient';
+import { supabase, calcularTotalVenta, obtenerProximoCorte } from '@/lib/supabaseClient';
 
 export default function PortalHaruss() {
   const router = useRouter();
@@ -14,7 +14,6 @@ export default function PortalHaruss() {
   const [recepcionesPendientes, setRecepcionesPendientes] = useState<any[]>([]);
   const [rentasHistorial, setRentasHistorial] = useState<any[]>([]);
   
-  // Pestaña activa en Haruss Cake
   const [seccionActiva, setSeccionActiva] = useState<'inventario' | 'acciones' | 'aprobaciones' | 'auditoria' | 'pedidos'>('inventario');
 
   // Auditoría
@@ -26,18 +25,35 @@ export default function PortalHaruss() {
   // Filtros de Inventario
   const [busqueda, setBusqueda] = useState('');
   const [categoriaFiltro, setCategoriaFiltro] = useState('todas');
+  const [soloExistencia, setSoloExistencia] = useState(true);
   const [orden, setOrden] = useState<'nombre' | 'stock_desc' | 'precio_desc'>('nombre');
 
-  // Formularios
+  // Formularios y Buscador Desplegable de Venta
   const [prodVenta, setProdVenta] = useState('');
+  const [textoBusquedaVenta, setTextoBusquedaVenta] = useState('');
+  const [dropdownVentaAbierto, setDropdownVentaAbierto] = useState(false);
+  const ventaDropdownRef = useRef<HTMLDivElement>(null);
+
   const [cantVenta, setCantVenta] = useState(1);
   const [descPedido, setDescPedido] = useState('');
   const [piezasPedido, setPiezasPedido] = useState(1);
   const [montoPago, setMontoPago] = useState('');
   const [notaPago, setNotaPago] = useState('');
 
+  const proximoCorte = useMemo(() => obtenerProximoCorte('haruss'), []);
+
   useEffect(() => {
     verificarSesion();
+  }, []);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ventaDropdownRef.current && !ventaDropdownRef.current.contains(e.target as Node)) {
+        setDropdownVentaAbierto(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   const verificarSesion = async () => {
@@ -54,17 +70,32 @@ export default function PortalHaruss() {
     const { data: t } = await supabase.from('tiendas').select('*').eq('id', 'haruss').single();
     if (t) setInfoTienda(t);
 
+    // Catálogo completo sincronizado con el stock de Haruss
+    const { data: prods } = await supabase.from('productos').select('*').order('nombre', { ascending: true });
     const { data: inv } = await supabase
       .from('inventario_tienda')
-      .select('*, productos(*)')
+      .select('*')
       .eq('tienda_id', 'haruss');
-    if (inv) setInventario(inv);
+
+    if (prods) {
+      const listaCompleta = prods.map((p) => {
+        const reg = inv?.find((i) => i.producto_id === p.id);
+        return {
+          id: reg?.id || `temp-${p.id}`,
+          producto_id: p.id,
+          stock_actual: reg ? reg.stock_actual : 0,
+          productos: p,
+        };
+      });
+      setInventario(listaCompleta);
+    }
 
     const { data: rec } = await supabase
       .from('movimientos_stock')
-      .select('*, productos(nombre)')
+      .select('*, productos(nombre, sku)')
       .eq('tienda_id', 'haruss')
-      .eq('estado', 'pendiente_recepcion');
+      .eq('estado', 'pendiente_recepcion')
+      .order('creado_en', { ascending: false });
     if (rec) setRecepcionesPendientes(rec);
 
     const { data: rentas } = await supabase
@@ -113,38 +144,69 @@ export default function PortalHaruss() {
   const productosFiltrados = useMemo(() => {
     return inventario
       .filter(item => {
+        const coincideExistencia = soloExistencia ? item.stock_actual > 0 : true;
         const coincideTexto = 
           item.productos?.nombre?.toLowerCase().includes(busqueda.toLowerCase()) ||
           item.productos?.sku?.toLowerCase().includes(busqueda.toLowerCase());
         const coincideCat = categoriaFiltro === 'todas' || item.productos?.categoria === categoriaFiltro;
-        return coincideTexto && coincideCat;
+        return coincideExistencia && coincideTexto && coincideCat;
       })
       .sort((a, b) => {
         if (orden === 'stock_desc') return b.stock_actual - a.stock_actual;
         if (orden === 'precio_desc') return (b.productos?.precio_venta || 0) - (a.productos?.precio_venta || 0);
         return (a.productos?.nombre || '').localeCompare(b.productos?.nombre || '');
       });
-  }, [inventario, busqueda, categoriaFiltro, orden]);
+  }, [inventario, busqueda, categoriaFiltro, soloExistencia, orden]);
 
-  // Confirmar Reabastecimiento o Retiro/Retorno de Bazar en Haruss
+  const opcionesVentaFiltradas = useMemo(() => {
+    const disponibles = inventario.filter(i => i.stock_actual > 0);
+    if (!textoBusquedaVenta.trim()) return disponibles;
+    const q = textoBusquedaVenta.toLowerCase();
+    return disponibles.filter(i =>
+      i.productos?.nombre?.toLowerCase().includes(q) ||
+      i.productos?.sku?.toLowerCase().includes(q)
+    );
+  }, [inventario, textoBusquedaVenta]);
+
+  // Confirmar movimiento y actualizar stock real en anaquel
   const handleConfirmarMovimiento = async (mov: any) => {
+    const { data: registroActual } = await supabase
+      .from('inventario_tienda')
+      .select('id, stock_actual')
+      .eq('tienda_id', 'haruss')
+      .eq('producto_id', mov.producto_id)
+      .maybeSingle();
+
+    const stockPrevio = registroActual?.stock_actual || 0;
+    const nuevoStock = mov.tipo === 'alta'
+      ? stockPrevio + mov.cantidad
+      : Math.max(0, stockPrevio - mov.cantidad);
+
+    if (registroActual?.id) {
+      const { error: errUpd } = await supabase
+        .from('inventario_tienda')
+        .update({ stock_actual: nuevoStock, actualizado_en: new Date().toISOString() })
+        .eq('id', registroActual.id);
+      if (errUpd) {
+        alert('Error al actualizar anaquel: ' + errUpd.message);
+        return;
+      }
+    } else {
+      const { error: errIns } = await supabase
+        .from('inventario_tienda')
+        .insert({ tienda_id: 'haruss', producto_id: mov.producto_id, stock_actual: nuevoStock });
+      if (errIns) {
+        alert('Error al insertar en anaquel: ' + errIns.message);
+        return;
+      }
+    }
+
     await supabase
       .from('movimientos_stock')
       .update({ estado: 'confirmado', confirmado_en: new Date().toISOString() })
       .eq('id', mov.id);
 
-    const item = inventario.find((i) => i.producto_id === mov.producto_id);
-    const stockActual = item?.stock_actual || 0;
-    
-    const nuevoStock = mov.tipo === 'alta' 
-      ? stockActual + mov.cantidad 
-      : Math.max(0, stockActual - mov.cantidad);
-
-    await supabase
-      .from('inventario_tienda')
-      .upsert({ tienda_id: 'haruss', producto_id: mov.producto_id, stock_actual: nuevoStock });
-
-    alert('Movimiento confirmado en el anaquel.');
+    alert(`Movimiento confirmado. Nuevo stock en anaquel de "${mov.productos?.nombre}": ${nuevoStock} piezas.`);
     cargarPortal();
   };
 
@@ -161,7 +223,7 @@ export default function PortalHaruss() {
     e.preventDefault();
     const itemInv = inventario.find((i) => i.producto_id === prodVenta);
     if (!itemInv || itemInv.stock_actual < cantVenta) {
-      alert('Stock insuficiente en anaquel para registrar esta venta.');
+      alert('Selecciona un producto válido con stock suficiente.');
       return;
     }
 
@@ -183,12 +245,15 @@ export default function PortalHaruss() {
 
     await supabase
       .from('inventario_tienda')
-      .update({ stock_actual: itemInv.stock_actual - cantVenta })
-      .eq('id', itemInv.id);
+      .update({ stock_actual: itemInv.stock_actual - cantVenta, actualizado_en: new Date().toISOString() })
+      .eq('tienda_id', 'haruss')
+      .eq('producto_id', prodVenta);
 
     const msjDetalle = detallePromocion ? ` (${detallePromocion})` : '';
-    alert(`Venta registrada exitosamente.${msjDetalle}\nTotal recaudado: $${total.toFixed(2)} MXN\n(Registrado para el corte quincenal de Five Friends)`);
+    alert(`Venta registrada.${msjDetalle}\nTotal recaudado: $${total.toFixed(2)} MXN`);
 
+    setProdVenta('');
+    setTextoBusquedaVenta('');
     setCantVenta(1);
     cargarPortal();
   };
@@ -203,7 +268,7 @@ export default function PortalHaruss() {
     });
     setMontoPago('');
     setNotaPago('');
-    alert('Comprobante de corte enviado a Five Friends para validación.');
+    alert('Comprobante de corte enviado a Five Friends.');
     cargarPortal();
   };
 
@@ -215,7 +280,7 @@ export default function PortalHaruss() {
       piezas_estimadas: piezasPedido
     });
     setDescPedido('');
-    alert('Encargo especial enviado al taller de Five Friends.');
+    alert('Encargo especial enviado al taller 5F.');
   };
 
   if (!autorizado) {
@@ -230,56 +295,71 @@ export default function PortalHaruss() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <HeaderNav titulo="Haruss Cake" rol="haruss" />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-5">
         
-        {/* Cabecera Comercial */}
-        <div className="bg-gradient-to-r from-slate-900 to-slate-800 border border-slate-800 p-4 sm:p-6 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">Haruss Cake</h1>
-            <p className="text-xs sm:text-sm text-slate-400 mt-1">
-              Renta Fija de Espacio: <span className="text-indigo-400 font-semibold">$250.00 MXN mensuales</span> | 100% venta de piezas para Five Friends.
-            </p>
+        {/* RECORDATORIO DE CORTE QUINCENAL Y RENTA */}
+        <div className={`border p-3.5 sm:p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 ${
+          proximoCorte.esHoy || proximoCorte.esManana
+            ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
+            : 'bg-slate-900 border-slate-800 text-slate-300'
+        }`}>
+          <div className="flex items-center gap-2.5">
+            <span className="text-lg">📅</span>
+            <div>
+              <p className="text-xs sm:text-sm font-bold text-white">
+                {proximoCorte.esHoy
+                  ? '¡Hoy toca visita y corte quincenal en Haruss Cake!'
+                  : proximoCorte.esManana
+                  ? 'Recordatorio: Mañana toca corte quincenal'
+                  : `Próximo corte quincenal: ${proximoCorte.fechaTexto}`}
+              </p>
+              <p className="text-[11px] text-slate-400">
+                {proximoCorte.diasRestantes === 0
+                  ? 'Corte de ventas del anaquel y revisión de espacio.'
+                  : `Faltan ${proximoCorte.diasRestantes} día(s) • Renta mensual fija: $250.00 MXN`}
+              </p>
+            </div>
           </div>
-          <div className="w-full sm:w-auto bg-slate-950/60 border border-slate-800/80 px-3.5 py-2 rounded-xl text-left sm:text-right">
-            <span className="text-[10px] uppercase font-mono text-slate-400 block">Día de Visita y Corte</span>
-            <span className="text-xs sm:text-sm font-bold text-amber-400">Miércoles alternados (Quincenal)</span>
-          </div>
+          {rentasPorConfirmar.length > 0 && (
+            <button
+              onClick={() => setSeccionActiva('aprobaciones')}
+              className="text-xs font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 px-3 py-1.5 rounded-lg font-bold animate-pulse"
+            >
+              🔔 {rentasPorConfirmar.length} pago(s) de renta por confirmar
+            </button>
+          )}
         </div>
 
         {/* Tarjetas Financieras */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-          <div className="bg-slate-900 border border-indigo-500/30 p-4 sm:p-5 rounded-2xl bg-indigo-500/5">
+          <div className="bg-slate-900 border border-indigo-500/30 p-4 rounded-2xl bg-indigo-500/5">
             <span className="text-[11px] text-indigo-400 uppercase font-mono font-bold block">Renta Mensual 5F</span>
             <p className="text-2xl font-extrabold text-indigo-400 mt-1">$250.00 <span className="text-xs font-normal text-slate-400">MXN</span></p>
-            <span className="text-[10px] text-slate-400 block mt-1">Cubierto por Five Friends</span>
           </div>
 
-          <div className="bg-slate-900 border border-amber-500/30 p-4 sm:p-5 rounded-2xl bg-amber-500/5">
+          <div className="bg-slate-900 border border-amber-500/30 p-4 rounded-2xl bg-amber-500/5">
             <span className="text-[11px] text-amber-400 uppercase font-mono font-bold block">Por Entregar en Corte</span>
             <p className="text-2xl font-extrabold text-amber-400 mt-1">
               ${saldoPendientePorLiquidar.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-400 block mt-1">Total de ventas pendientes</span>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
             <span className="text-[11px] text-slate-400 uppercase font-mono block">Cortes Liquidados</span>
             <p className="text-2xl font-extrabold text-slate-200 mt-1">
               ${totalPagadoAprobado.toLocaleString('es-MX', { minimumFractionDigits: 2 })}
             </p>
-            <span className="text-[10px] text-slate-500 block mt-1">Aprobados por Five Friends</span>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 p-4 sm:p-5 rounded-2xl">
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
             <span className="text-[11px] text-slate-400 uppercase font-mono block">Piezas Vendidas</span>
             <p className="text-2xl font-extrabold text-white mt-1">
               {totalPiezasVendidas} <span className="text-xs font-normal text-slate-400">pzas</span>
             </p>
-            <span className="text-[10px] text-slate-500 block mt-1">Histórico en anaquel</span>
           </div>
         </div>
 
-        {/* MENÚ DE PESTAÑAS HARUSS CAKE */}
+        {/* Menú de Pestañas */}
         <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs sm:text-sm overflow-x-auto">
           <button
             onClick={() => setSeccionActiva('inventario')}
@@ -295,16 +375,18 @@ export default function PortalHaruss() {
               seccionActiva === 'acciones' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
             }`}
           >
-            ⚡ Registrar Venta / Corte
+            ⚡ Venta / Corte
           </button>
           <button
             onClick={() => setSeccionActiva('aprobaciones')}
-            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap relative ${
+            className={`flex-1 py-2.5 px-3 rounded-xl font-bold transition whitespace-nowrap ${
               seccionActiva === 'aprobaciones' ? 'bg-amber-500 text-slate-950 shadow-md' : 'text-slate-400 hover:text-white'
             }`}
           >
-            🔔 Aprobaciones {(recepcionesPendientes.length > 0 || rentasPorConfirmar.length > 0) && (
-              <span className="w-2 h-2 rounded-full bg-rose-500 inline-block ml-1"></span>
+            🔔 Aprobaciones {(recepcionesPendientes.length + rentasPorConfirmar.length) > 0 && (
+              <span className="ml-1 bg-rose-600 text-white text-[10px] px-1.5 py-0.5 rounded-full">
+                {recepcionesPendientes.length + rentasPorConfirmar.length}
+              </span>
             )}
           </button>
           <button
@@ -325,15 +407,26 @@ export default function PortalHaruss() {
           </button>
         </div>
 
-        {/* CONTENIDO 1: ANAQUEL */}
+        {/* 1. ANAQUEL CON BOTÓN "SOLO EN EXISTENCIA" */}
         {seccionActiva === 'inventario' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-white">Inventario en Anaquel</h2>
-                <p className="text-xs text-slate-400">Total disponible: {inventario.reduce((acc, i) => acc + (i.stock_actual || 0), 0)} unidades</p>
+                <h2 className="text-base sm:text-lg font-bold text-white">Catálogo e Inventario en Anaquel</h2>
+                <p className="text-xs text-slate-400">
+                  Piezas disponibles en espacio: {inventario.reduce((acc, i) => acc + (i.stock_actual || 0), 0)} unidades
+                </p>
               </div>
-              <span className="text-xs text-amber-400 font-mono">Mostrando {productosFiltrados.length} piezas</span>
+              <button
+                onClick={() => setSoloExistencia(!soloExistencia)}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition flex items-center gap-2 ${
+                  soloExistencia
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                    : 'bg-slate-950 border-slate-800 text-slate-400'
+                }`}
+              >
+                <span>{soloExistencia ? '✓ Mostrando solo en existencia' : 'Mostrar todos (incluye 0 stock)'}</span>
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
@@ -366,19 +459,25 @@ export default function PortalHaruss() {
 
             {/* Móvil */}
             <div className="grid grid-cols-1 gap-2.5 md:hidden">
-              {productosFiltrados.map((item) => (
-                <div key={item.id} className="bg-slate-950/70 border border-slate-800/80 p-3 rounded-xl flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <span className="text-[10px] text-slate-500 uppercase font-mono block truncate">{item.productos?.categoria} • {item.productos?.sku}</span>
-                    <h4 className="text-sm font-semibold text-slate-100 truncate mt-0.5">{item.productos?.nombre}</h4>
-                    <p className="text-xs text-amber-400 font-mono mt-0.5">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</p>
+              {productosFiltrados.length === 0 ? (
+                <p className="text-center text-slate-500 text-xs py-6">No hay productos con esos filtros.</p>
+              ) : (
+                productosFiltrados.map((item) => (
+                  <div key={item.id} className="bg-slate-950/70 border border-slate-800/80 p-3 rounded-xl flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="text-[10px] text-slate-500 uppercase font-mono block truncate">{item.productos?.categoria} • {item.productos?.sku}</span>
+                      <h4 className="text-sm font-semibold text-slate-100 truncate mt-0.5">{item.productos?.nombre}</h4>
+                      <p className="text-xs text-amber-400 font-mono mt-0.5">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</p>
+                    </div>
+                    <div className="text-right shrink-0 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg">
+                      <span className="text-[10px] text-slate-400 block font-mono">Anaquel</span>
+                      <span className={`text-base font-extrabold ${item.stock_actual > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                        {item.stock_actual}
+                      </span>
+                    </div>
                   </div>
-                  <div className="text-right shrink-0 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block font-mono">Stock</span>
-                    <span className="text-base font-extrabold text-amber-400">{item.stock_actual}</span>
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Laptop */}
@@ -400,7 +499,9 @@ export default function PortalHaruss() {
                       <td className="p-3 font-medium text-slate-100">{item.productos?.nombre}</td>
                       <td className="p-3 font-mono text-xs text-slate-400">{item.productos?.sku}</td>
                       <td className="p-3 font-mono">${Number(item.productos?.precio_venta || 0).toFixed(2)} MXN</td>
-                      <td className="p-3 text-right font-bold text-amber-400">{item.stock_actual}</td>
+                      <td className={`p-3 text-right font-bold ${item.stock_actual > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                        {item.stock_actual}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -409,28 +510,68 @@ export default function PortalHaruss() {
           </div>
         )}
 
-        {/* CONTENIDO 2: ACCIONES */}
+        {/* 2. ACCIONES CON BUSCADOR DESPLEGABLE INTERACTIVO */}
         {seccionActiva === 'acciones' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
             <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
               <h2 className="text-base sm:text-lg font-bold text-white mb-3">Registrar Venta de Piezas</h2>
               <form onSubmit={handleRegistrarVenta} className="space-y-3">
-                <div>
-                  <label className="text-xs text-slate-400 block mb-1">Pieza vendida</label>
-                  <select
-                    value={prodVenta}
-                    onChange={(e) => setProdVenta(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-200 outline-none focus:border-emerald-500"
-                    required
-                  >
-                    <option value="">Selecciona el producto...</option>
-                    {inventario.map((i) => (
-                      <option key={i.id} value={i.producto_id}>
-                        {i.productos?.nombre} ({i.stock_actual} disp. | ${i.productos?.precio_venta} MXN)
-                      </option>
-                    ))}
-                  </select>
+                <div ref={ventaDropdownRef} className="relative">
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Pieza vendida (Escribe para filtrar o despliega la lista)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="🔍 Escribe el nombre o haz clic para ver lista..."
+                      value={textoBusquedaVenta}
+                      onFocus={() => setDropdownVentaAbierto(true)}
+                      onChange={(e) => {
+                        setTextoBusquedaVenta(e.target.value);
+                        setProdVenta('');
+                        setDropdownVentaAbierto(true);
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setDropdownVentaAbierto(!dropdownVentaAbierto)}
+                      className="absolute right-3 top-2.5 text-slate-400 text-xs"
+                    >
+                      ▼
+                    </button>
+                  </div>
+
+                  {dropdownVentaAbierto && (
+                    <div className="absolute left-0 right-0 mt-1.5 max-h-60 overflow-y-auto bg-slate-950 border border-slate-700 rounded-xl shadow-2xl z-50 divide-y divide-slate-800">
+                      {opcionesVentaFiltradas.length === 0 ? (
+                        <div className="p-3 text-xs text-slate-500 text-center">No hay piezas disponibles con ese nombre.</div>
+                      ) : (
+                        opcionesVentaFiltradas.map((item) => (
+                          <button
+                            type="button"
+                            key={item.producto_id}
+                            onClick={() => {
+                              setProdVenta(item.producto_id);
+                              setTextoBusquedaVenta(`${item.productos?.nombre} ($${item.productos?.precio_venta} MXN)`);
+                              setDropdownVentaAbierto(false);
+                            }}
+                            className="w-full text-left p-3 hover:bg-slate-900 transition flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-semibold text-slate-100 block truncate">{item.productos?.nombre}</span>
+                              <span className="text-[10px] text-slate-500 font-mono">${item.productos?.precio_venta} MXN c/u</span>
+                            </div>
+                            <span className="shrink-0 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-mono font-bold">
+                              {item.stock_actual} disp.
+                            </span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
                 </div>
+
                 <div>
                   <label className="text-xs text-slate-400 block mb-1">Cantidad</label>
                   <input
@@ -486,15 +627,11 @@ export default function PortalHaruss() {
           </div>
         )}
 
-        {/* CONTENIDO 3: APROBACIONES (STOCK, BAZAR Y RENTA) */}
+        {/* 3. APROBACIONES */}
         {seccionActiva === 'aprobaciones' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <h2 className="text-base sm:text-lg font-bold text-white">Aprobaciones de Mercancía y Rentas</h2>
-            <p className="text-xs text-slate-400">
-              Valida los reabastecimientos que llegan a anaquel, salidas de material para bazar y los pagos de renta mensual emitidos por Five Friends.
-            </p>
 
-            {/* Rentas por Aprobar */}
             {rentasPorConfirmar.length > 0 && (
               <div className="bg-indigo-500/10 border border-indigo-500/30 p-4 rounded-xl space-y-2">
                 <h3 className="text-xs sm:text-sm font-bold text-indigo-400">Renta Mensual por Confirmar</h3>
@@ -515,7 +652,6 @@ export default function PortalHaruss() {
               </div>
             )}
 
-            {/* Mercancía por Aprobar */}
             {recepcionesPendientes.length === 0 ? (
               <p className="text-xs text-slate-500 py-6 text-center">No tienes mercancía pendiente de confirmar.</p>
             ) : (
@@ -526,10 +662,9 @@ export default function PortalHaruss() {
                       <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded font-bold inline-block mb-1 ${
                         m.tipo === 'alta' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                       }`}>
-                        {m.tipo === 'alta' ? 'Entrada / Reingreso' : 'Salida / Retiro Bazar'}
+                        {m.tipo === 'alta' ? `+${m.cantidad} Entrada / Reingreso` : `-${m.cantidad} Retiro Bazar`}
                       </span>
                       <h4 className="text-sm font-semibold text-white truncate">{m.productos?.nombre}</h4>
-                      <p className="text-xs text-amber-400 font-mono font-bold">{m.cantidad} piezas</p>
                       <p className="text-[11px] text-slate-400 mt-0.5">{m.nota || 'Sin notas'}</p>
                     </div>
                     <button
@@ -545,13 +680,12 @@ export default function PortalHaruss() {
           </div>
         )}
 
-        {/* CONTENIDO 4: HISTORIAL */}
+        {/* 4. HISTORIAL */}
         {seccionActiva === 'auditoria' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-800 pb-3">
               <div>
                 <h2 className="text-base sm:text-lg font-bold text-white">Historial Auditable</h2>
-                <p className="text-xs text-slate-400">Bitácora de ventas, movimientos, liquidaciones y rentas.</p>
               </div>
 
               <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 text-[11px] w-full sm:w-auto overflow-x-auto">
@@ -706,17 +840,16 @@ export default function PortalHaruss() {
           </div>
         )}
 
-        {/* CONTENIDO 5: ENCARGOS */}
+        {/* 5. ENCARGOS */}
         {seccionActiva === 'pedidos' && (
           <div className="bg-slate-900 border border-slate-800 p-4 sm:p-6 rounded-2xl">
             <h2 className="text-base sm:text-lg font-bold text-white mb-2">Solicitar Pedidos Especiales</h2>
-            <p className="text-xs text-slate-400 mb-4">Encarga piezas solicitadas por clientes que no tengas en anaquel.</p>
             <form onSubmit={handleCrearPedido} className="space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                 <input
                   type="text"
                   required
-                  placeholder="Descripción de la pieza, personajes o detalles..."
+                  placeholder="Descripción del encargo..."
                   value={descPedido}
                   onChange={(e) => setDescPedido(e.target.value)}
                   className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100"
