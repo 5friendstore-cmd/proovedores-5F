@@ -23,12 +23,6 @@ export interface Producto {
   precio_venta: number;
 }
 
-/**
- * Función para calcular el total considerando las promociones de figuras mini:
- * - Pequeñas: $5 c/u o paquete de 16 por $50
- * - Medianas: $10 c/u o paquete de 8 por $50
- * - Grandes: $20 c/u
- */
 export function calcularTotalVenta(
   sku: string,
   cantidad: number,
@@ -38,7 +32,6 @@ export function calcularTotalVenta(
   precioEfectivoPorPieza: number;
   detallePromocion?: string;
 } {
-  // Figuras mini pequeñas (16 x $50, sueltas a $5)
   if (sku === 'FIG-MINI-PEQ-003') {
     const paquetes = Math.floor(cantidad / 16);
     const sobrantes = cantidad % 16;
@@ -55,7 +48,6 @@ export function calcularTotalVenta(
     };
   }
 
-  // Figuras mini medianas (8 x $50, sueltas a $10)
   if (sku === 'FIG-MINI-MED-001') {
     const paquetes = Math.floor(cantidad / 8);
     const sobrantes = cantidad % 8;
@@ -72,10 +64,51 @@ export function calcularTotalVenta(
     };
   }
 
-  // Figuras mini grandes u otros productos normales
   const total = cantidad * precioUnitarioBase;
   return {
     total,
     precioEfectivoPorPieza: precioUnitarioBase,
+  };
+}
+
+/**
+ * Calcula la próxima fecha de corte quincenal a partir de la fecha base:
+ * - Taiyari: Lunes alternados desde 19 Oct 2026
+ * - Haruss: Miércoles alternados desde 21 Oct 2026
+ */
+export function obtenerProximoCorte(tiendaId: 'taiyari' | 'haruss'): {
+  fechaTexto: string;
+  diasRestantes: number;
+  esHoy: boolean;
+  esManana: boolean;
+} {
+  const baseStr = tiendaId === 'taiyari' ? '2026-10-19T00:00:00' : '2026-10-21T00:00:00';
+  const fechaBase = new Date(baseStr);
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  const msPorDia = 1000 * 60 * 60 * 24;
+  const diffDias = Math.floor((hoy.getTime() - fechaBase.getTime()) / msPorDia);
+
+  let diasParaProximo = 0;
+  if (diffDias <= 0) {
+    diasParaProximo = Math.abs(diffDias);
+  } else {
+    const resto = diffDias % 14;
+    diasParaProximo = resto === 0 ? 0 : 14 - resto;
+  }
+
+  const proximaFecha = new Date(hoy.getTime() + diasParaProximo * msPorDia);
+  const fechaTexto = proximaFecha.toLocaleDateString('es-MX', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
+
+  return {
+    fechaTexto,
+    diasRestantes: diasParaProximo,
+    esHoy: diasParaProximo === 0,
+    esManana: diasParaProximo === 1,
   };
 }
